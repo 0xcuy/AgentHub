@@ -826,3 +826,211 @@ async fn sse_stream_pushes_inbox_events_only_for_self() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let _ = a1;
 }
+
+// --- Security fix-now: V1 security headers ---
+
+#[tokio::test]
+async fn security_headers_on_all_responses() {
+    let router = test_app("secHeaders");
+    for uri in ["/", "/login", "/signup", "/app", "/v1/channels", "/static/app.css", "/healthz"] {
+        let req = Request::builder().method("GET").uri(uri).body(Body::empty()).unwrap();
+        let res = Oneshot::new(router.clone(), req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "uri: {uri}");
+        let h = res.headers();
+        assert_eq!(
+            h.get("strict-transport-security").unwrap(),
+            "max-age=31536000; includeSubDomains",
+            "uri: {uri}"
+        );
+        let csp = h.get("content-security-policy").unwrap().to_str().unwrap();
+        for directive in [
+            "default-src 'self'",
+            "script-src 'self' 'unsafe-inline'",
+            "style-src 'self' 'unsafe-inline'",
+            "img-src 'self' data:",
+            "font-src 'self'",
+            "connect-src 'self'",
+            "frame-ancestors 'none'",
+        ] {
+            assert!(csp.contains(directive), "uri: {uri}, csp missing: {directive}");
+        }
+        assert_eq!(h.get("x-frame-options").unwrap(), "DENY", "uri: {uri}");
+        assert_eq!(h.get("x-content-type-options").unwrap(), "nosniff", "uri: {uri}");
+        assert_eq!(
+            h.get("referrer-policy").unwrap(),
+            "strict-origin-when-cross-origin",
+            "uri: {uri}"
+        );
+    }
+
+    // headers are also present on error and rate-limited responses
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/agents/me")
+        .body(Body::empty())
+        .unwrap();
+    let res = Oneshot::new(router.clone(), req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    assert!(res.headers().contains_key("strict-transport-security"));
+    assert!(res.headers().contains_key("content-security-policy"));
+    assert!(res.headers().contains_key("x-frame-options"));
+    assert!(res.headers().contains_key("x-content-type-options"));
+    assert!(res.headers().contains_key("referrer-policy"));
+}
+
+// --- Security fix-now: V2 login brute-force throttle ---
+
+#[tokio::test]
+async fn login_lockout_after_repeated_failures() {
+    let (router, state) = test_app_with_state("loginThrottle");
+    let bad = json!({ "email": "nobody@example.com", "password": "wrongpass" });
+
+    // first 5 failures from one IP are plain 401s
+    for i in 1..=5 {
+        let (status, _) =
+            call(&router, "POST", "/ui/login", None, Some(bad.clone()), ).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "attempt {i} must still be 401");
+    }
+    // the 6th is locked out with a Retry-After
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ui/login")
+        .header("Content-Type", "application/json")
+        .body(Body::from(bad.to_string()))
+        .unwrap();
+    let res = Oneshot::new(router.clone(), req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry = res
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .expect("429 must carry a Retry-After header");
+    assert!(retry > 0 && retry <= 15 * 60);
+
+    // a different IP is unaffected
+    let (status, _) = call_raw(
+        &router,
+        "POST",
+        "/ui/login",
+        None,
+        Some(bad.clone()),
+        &[("X-Forwarded-For", "203.0.113.7")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // the lockout is lifted once the IP records a successful login
+    // (simulated here by the same reset the success path performs).
+    state.login_throttle.reset("unknown");
+    let (status, _) = call(&router, "POST", "/ui/login", None, Some(bad)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "after reset the window starts fresh");
+}
+
+// --- Security fix-now: V3 per-IP limit on unauthenticated POSTs ---
+
+#[tokio::test]
+async fn unauth_post_rate_limited_per_ip() {
+    let router = test_app("ipLimit");
+
+    // POST /v1/agents: the 21st request from one IP gets 429 + Retry-After
+    let mut saw_429 = false;
+    for i in 0..25 {
+        let (status, v) = call(
+            &router,
+            "POST",
+            "/v1/agents",
+            None,
+            Some(json!({ "name": "x", "handle": format!("h{i}") })),
+        )
+        .await;
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            saw_429 = true;
+            assert_eq!(v["error"]["code"], "rate_limited");
+            assert!(i >= 20, "limit is 20; 429 came at request {}", i + 1);
+            break;
+        }
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    assert!(saw_429, "expected a 429 after the per-IP limit");
+
+    // another IP has its own budget (X-Forwarded-For sets the key)
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/agents")
+        .header("Content-Type", "application/json")
+        .header("X-Forwarded-For", "198.51.100.9")
+        .body(Body::from(json!({ "name": "y", "handle": "otherip" }).to_string()))
+        .unwrap();
+    let res = Oneshot::new(router.clone(), req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+
+    // /ui/signup counts against the same per-IP budget
+    let mut saw_429 = false;
+    for i in 0..25 {
+        let (status, _) = call(
+            &router,
+            "POST",
+            "/ui/signup",
+            None,
+            Some(json!({
+                "email": format!("u{i}@example.com"),
+                "password": "password123",
+                "handle": format!("su{i}"),
+                "name": "n",
+                "webhook_url": null,
+            })),
+        )
+        .await;
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            saw_429 = true;
+            break;
+        }
+    }
+    assert!(saw_429, "signup spam must hit the per-IP limit too");
+}
+
+// --- Security fix-now: V4 Secure session cookie ---
+
+#[tokio::test]
+async fn session_cookie_is_secure() {
+    let router = test_app("secureCookie");
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ui/signup")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "email": "sec@example.com",
+                "password": "password123",
+                "handle": "secure",
+                "name": "n",
+                "webhook_url": null,
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let res = Oneshot::new(router.clone(), req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let cookie = res
+        .headers()
+        .get("set-cookie")
+        .and_then(|v| v.to_str().ok())
+        .expect("signup must set the session cookie");
+    assert!(cookie.starts_with("aghub_session="), "cookie name: {cookie}");
+    for attr in ["Secure", "HttpOnly", "SameSite=Lax"] {
+        assert!(cookie.contains(attr), "cookie missing {attr}: {cookie}");
+    }
+
+    // logout clears the cookie with the same flags
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ui/logout")
+        .body(Body::empty())
+        .unwrap();
+    let res = Oneshot::new(router, req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let cookie = res.headers().get("set-cookie").unwrap().to_str().unwrap();
+    assert!(cookie.contains("Secure"), "logout cookie missing Secure: {cookie}");
+    assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Lax"));
+}
