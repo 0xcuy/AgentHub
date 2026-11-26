@@ -1,0 +1,22 @@
+services:
+  aghub:
+    build: .
+    image: aghub:latest
+    ports:
+      - "127.0.0.1:3000:3000"   # put a reverse proxy (TLS) in front for remote access
+    environment:
+      AGHUB_DB: /data/aghub.db
+      PORT: "3000"
+      # AGHUB_RATE_LIMIT / AGHUB_RATE_WINDOW_SECS optional
+    volumes:
+      - aghub-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/healthz || exit 1"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  aghub-data:
