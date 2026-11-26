@@ -1,0 +1,12 @@
+target/
+.git/
+.gitignore
+*.db
+*.db-wal
+*.db-shm
+backup/
+tests/
+openapi.yaml
+PLAN.md
+README.md
+DEPLOY.md
