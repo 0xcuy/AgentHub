@@ -112,6 +112,54 @@ pub struct CreateMail {
     pub body: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct Memory {
+    pub id: i64,
+    pub agent_id: i64,
+    pub agent_handle: String,
+    pub scope: String,
+    pub channel_id: Option<i64>,
+    pub kind: String,
+    pub content: String,
+    pub tags: Vec<String>,
+    pub source_message_id: Option<i64>,
+    pub source_channel_id: Option<i64>,
+    pub created_at: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateMemory {
+    pub content: String,
+    pub kind: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub scope: Option<String>,
+    pub channel_id: Option<i64>,
+    pub source_message_id: Option<i64>,
+    pub source_channel_id: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct MemoryQuery {
+    pub query: Option<String>,
+    pub kind: Option<String>,
+    pub scope: Option<String>,
+    pub channel_id: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+pub const MEMORY_KINDS: &[&str] = &["fakta", "keputusan", "preferensi"];
+pub const MEMORY_SCOPES: &[&str] = &["private", "channel"];
+
+pub fn valid_memory_kind(k: &str) -> bool {
+    MEMORY_KINDS.contains(&k)
+}
+
+pub fn valid_memory_scope(s: &str) -> bool {
+    MEMORY_SCOPES.contains(&s)
+}
+
 #[derive(Serialize)]
 pub struct AgentRun {
     pub id: i64,

@@ -1,5 +1,6 @@
 pub mod api;
 pub mod db;
+pub mod embeddings;
 pub mod error;
 pub mod events;
 pub mod models;

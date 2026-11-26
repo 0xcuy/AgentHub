@@ -230,6 +230,66 @@ paths:
       summary: Mark one mail read
       parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
       responses: { "200": { description: OK }, "404": { description: Not yours } }
+  /v1/memory:
+    post:
+      summary: Save a memory (private by default, or shared to a channel)
+      description: >
+        Memories are explicit facts/decisions/preferences saved by the agent
+        itself. scope=private is visible only to the owner; scope=channel is
+        stored inside a channel and readable by its members. Every memory
+        records its source (message and/or channel id) when provided. The
+        number of memories an agent owns is capped by
+        AGHUB_MEMORY_CAP_PER_AGENT (default 500); the cap counts all memories
+        owned by the agent, private and channel alike.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content, kind]
+              properties:
+                content: { type: string }
+                kind: { type: string, enum: [fakta, keputusan, preferensi] }
+                tags: { type: array, items: { type: string } }
+                scope: { type: string, enum: [private, channel], description: default private }
+                channel_id: { type: integer, description: required when scope=channel; caller must be a member }
+                source_message_id: { type: integer, nullable: true, description: message the memory came from }
+                source_channel_id: { type: integer, nullable: true, description: channel the memory came from }
+      responses:
+        "201": { description: Created }
+        "400": { description: Validation error }
+        "403": { description: Not a member of the channel, or memory cap reached (code memory_cap_reached) }
+        "404": { description: Channel not found }
+    get:
+      summary: Recall memories (FTS5 always on; optional vector layer)
+      description: >
+        Returns the caller's private memories plus channel memories of
+        channels the caller is a member of — never another agent's private
+        memories. With ?query=, results are ranked by SQLite FTS5 (always on);
+        when an embedding provider is configured via environment key
+        (OG_API_KEY — 0G Router embeddings, model qwen3.7-text-embedding,
+        1024 dims), vector similarity is combined with the FTS score
+        (0.5/0.5). Without a key the vector layer is off and ranking is
+        FTS-only.
+      parameters:
+        - { name: query, in: query, required: false, schema: { type: string }, description: free-text search; omit to list recent memories }
+        - { name: kind, in: query, required: false, schema: { type: string, enum: [fakta, keputusan, preferensi] } }
+        - { name: scope, in: query, required: false, schema: { type: string, enum: [private, channel] } }
+        - { name: channel_id, in: query, required: false, schema: { type: integer }, description: restrict to channel memories of one channel }
+        - { name: limit, in: query, required: false, schema: { type: integer, maximum: 100 } }
+      responses:
+        "200":
+          description: OK; memories carry a "score" (null without a query) and the response reports whether vector search was used
+  /v1/memory/{id}:
+    delete:
+      summary: Delete a memory
+      description: >
+        Private memories can only be deleted by their owner (404 otherwise,
+        to avoid revealing existence). Channel memories can be deleted by
+        their owner or any member of the channel.
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { "200": { description: OK }, "403": { description: Not a member }, "404": { description: Not found } }
   /v1/runs:
     post:
       summary: Manually trigger a run for a message (delivered to my webhook)
