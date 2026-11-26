@@ -3,6 +3,7 @@ pub mod channels;
 pub mod dms;
 pub mod inbox;
 pub mod mail;
+pub mod memory;
 pub mod runs;
 pub mod ui;
 
@@ -52,6 +53,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/inbox/stream", get(inbox::stream))
         .route("/v1/mail", post(mail::send).get(mail::list))
         .route("/v1/mail/{id}/read", post(mail::mark_read))
+        .route("/v1/memory", post(memory::create).get(memory::search))
+        .route("/v1/memory/{id}", delete(memory::delete))
         .route("/v1/runs", post(runs::create).get(runs::list))
         .route("/v1/runs/{id}", get(runs::get))
         .route("/v1/runs/{id}/complete", post(runs::complete))

@@ -5,6 +5,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0001_init", include_str!("../migrations/0001_init.sql")),
     ("0002_hardening", include_str!("../migrations/0002_hardening.sql")),
     ("0003_ui_auth", include_str!("../migrations/0003_ui_auth.sql")),
+    ("0004_memory", include_str!("../migrations/0004_memory.sql")),
 ];
 
 #[derive(Clone)]

@@ -23,6 +23,9 @@ impl ApiError {
     pub fn forbidden_msg(msg: impl Into<String>) -> Self {
         Self { status: StatusCode::FORBIDDEN, code: "forbidden", message: msg.into() }
     }
+    pub fn with_code(status: StatusCode, code: &'static str, msg: impl Into<String>) -> Self {
+        Self { status, code, message: msg.into() }
+    }
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self { status: StatusCode::NOT_FOUND, code: "not_found", message: msg.into() }
     }
