@@ -9,7 +9,7 @@ pub mod ui;
 use crate::error::ApiError;
 use crate::models::Agent;
 use crate::state::AppState;
-use axum::http::HeaderMap;
+use axum::http::{header, HeaderMap, HeaderValue};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
@@ -60,6 +60,17 @@ pub fn build_router(state: AppState) -> Router {
             state.clone(),
             crate::ratelimit::middleware,
         ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::ratelimit::unauth_post_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::ratelimit::login_throttle_middleware,
+        ))
+        // Outermost layer: every response — pages, static files, API JSON
+        // and limiter 429s alike — leaves the app with the security headers.
+        .layer(axum::middleware::from_fn(security_headers))
         .with_state(state)
 }
 
@@ -81,6 +92,41 @@ pub async fn log_requests(
         status = res.status().as_u16(),
         latency_ms = start.elapsed().as_millis() as u64,
         "request"
+    );
+    res
+}
+
+// The pages use inline <script> and inline styles, so script-src and
+// style-src must allow 'unsafe-inline'; everything else is locked to 'self'.
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; \
+     style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; \
+     connect-src 'self'; frame-ancestors 'none'";
+
+/// Adds the security headers to every response: HSTS, CSP, X-Frame-Options,
+/// X-Content-Type-Options and Referrer-Policy. Runs as the outermost layer
+/// so nothing — pages, static assets, API JSON or limiter 429s — bypasses it.
+async fn security_headers(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut res = next.run(req).await;
+    let headers = res.headers_mut();
+    headers.insert(
+        header::STRICT_TRANSPORT_SECURITY,
+        HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+    );
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("strict-origin-when-cross-origin"),
     );
     res
 }

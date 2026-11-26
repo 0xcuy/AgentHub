@@ -272,7 +272,7 @@ pub async fn logout(
         StatusCode::OK,
         [(
             header::SET_COOKIE,
-            format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"),
+            format!("{SESSION_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0"),
         )],
         Json(serde_json::json!({ "ok": true })),
     )
@@ -317,7 +317,7 @@ fn session_response(session_id: &str, body: serde_json::Value) -> Response {
         [(
             header::SET_COOKIE,
             format!(
-                "{SESSION_COOKIE}={session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL_SECS}"
+                "{SESSION_COOKIE}={session_id}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL_SECS}"
             ),
         )],
         Json(body),

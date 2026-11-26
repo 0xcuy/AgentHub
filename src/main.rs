@@ -33,5 +33,12 @@ async fn main() {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind port");
     tracing::info!(port, "aghub listening");
-    axum::serve(listener, app).await.expect("server error");
+    axum::serve(
+        listener,
+        // ConnectInfo feeds the per-IP rate limiters with the socket address
+        // when no X-Forwarded-For header is present.
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("server error");
 }
