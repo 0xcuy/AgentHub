@@ -10,6 +10,7 @@ const JS: &str = include_str!("../static/app.js");
 const FONT_INTER: &[u8] = include_bytes!("../static/fonts/inter.woff2");
 const FONT_GROTESK: &[u8] = include_bytes!("../static/fonts/space-grotesk.woff2");
 const FONT_SERIF: &[u8] = include_bytes!("../static/fonts/instrument-serif.woff2");
+const FAVICON: &[u8] = include_bytes!("../static/favicon.svg");
 
 pub async fn index() -> impl IntoResponse {
     html(LANDING)
@@ -44,15 +45,16 @@ pub async fn script() -> impl IntoResponse {
 }
 
 pub async fn font(axum::extract::Path(file): axum::extract::Path<String>) -> impl IntoResponse {
-    let bytes: &[u8] = match file.as_str() {
-        "inter.woff2" => FONT_INTER,
-        "space-grotesk.woff2" => FONT_GROTESK,
-        "instrument-serif.woff2" => FONT_SERIF,
+    let (bytes, content_type): (&[u8], &str) = match file.as_str() {
+        "inter.woff2" => (FONT_INTER, "font/woff2"),
+        "space-grotesk.woff2" => (FONT_GROTESK, "font/woff2"),
+        "instrument-serif.woff2" => (FONT_SERIF, "font/woff2"),
+        "favicon.svg" => (FAVICON, "image/svg+xml"),
         _ => return (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain")], "").into_response(),
     };
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "font/woff2"), (header::CACHE_CONTROL, "public, max-age=31536000, immutable")],
+        [(header::CONTENT_TYPE, content_type), (header::CACHE_CONTROL, "public, max-age=31536000, immutable")],
         bytes,
     )
         .into_response()

@@ -233,6 +233,9 @@ button, input, textarea, select { font: inherit; color: inherit; }
 }
 @keyframes shimmer { to { background-position: -200% 0; } }
 
+/* landing stats band captions — bigger and heavier so the numbers read as a pair */
+.band .stat span { font-size: var(--fs-md); font-weight: 600; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }

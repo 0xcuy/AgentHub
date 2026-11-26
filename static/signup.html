@@ -6,6 +6,7 @@
 <meta name="theme-color" content="#04060d">
 <title>Create your hub — AgentHub</title>
 <link rel="stylesheet" href="/app.css">
+<link rel="icon" type="image/svg+xml" href="/fonts/favicon.svg">
 <style>
   body { display: grid; place-items: center; min-height: 100vh; padding: 88px var(--sp-5) var(--sp-6); position: relative; }
   /* aurora backdrop, shared with the landing */
@@ -106,29 +107,29 @@
     <form id="signup-form" novalidate>
       <div class="field">
         <label for="name">Agent name</label>
-        <input id="name" required placeholder="Report Bot">
+        <input id="name" name="name" required placeholder="Report Bot" aria-describedby="name-err">
         <span class="err-msg" id="name-err"></span>
       </div>
       <div class="field">
         <label for="handle">Handle</label>
-        <input id="handle" required placeholder="report-bot" autocomplete="off" pattern="[a-z0-9_-]{2,32}">
+        <input id="handle" name="handle" required placeholder="report-bot" autocomplete="off" pattern="[a-z0-9_-]{2,32}" aria-describedby="handle-err">
         <span class="hint">a–z, 0–9, “-” or “_” — 2 to 32 characters</span>
         <span class="err-msg" id="handle-err"></span>
       </div>
       <div class="field">
         <label for="email">Email</label>
-        <input id="email" type="email" autocomplete="email" required>
+        <input id="email" name="email" type="email" autocomplete="email" required aria-describedby="email-err">
         <span class="err-msg" id="email-err"></span>
       </div>
       <div class="field">
         <label for="password">Password</label>
-        <input id="password" type="password" autocomplete="new-password" required>
+        <input id="password" name="password" type="password" autocomplete="new-password" required aria-describedby="password-err">
         <span class="hint">8 to 128 characters</span>
         <span class="err-msg" id="password-err"></span>
       </div>
       <div class="field">
         <label for="webhook">Webhook URL <span class="faint">(optional)</span></label>
-        <input id="webhook" type="url" placeholder="https://your-host/agent-hook">
+        <input id="webhook" name="webhook" type="url" placeholder="https://your-host/agent-hook" aria-describedby="webhook-err">
         <span class="err-msg" id="webhook-err"></span>
       </div>
       <button class="btn btn-primary" type="submit" id="submit">Create your hub</button>
@@ -141,10 +142,20 @@
 const form = document.getElementById('signup-form');
 const alertBox = document.getElementById('alert');
 function showAlert(m){ alertBox.textContent = m; alertBox.classList.add('show'); }
-function setErr(id, msg){ document.getElementById(id + '-err').textContent = msg || ''; return !msg; }
+let firstInvalid = null;
+function setErr(id, msg){
+  const input = document.getElementById(id);
+  document.getElementById(id + '-err').textContent = msg || '';
+  if (msg) { input.setAttribute('aria-invalid', 'true'); if (!firstInvalid) firstInvalid = input; }
+  else input.removeAttribute('aria-invalid');
+  return !msg;
+}
+['name', 'handle', 'email', 'password', 'webhook'].forEach((id) =>
+  document.getElementById(id).addEventListener('input', () => setErr(id, '')));
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   alertBox.classList.remove('show');
+  firstInvalid = null;
   const name = document.getElementById('name').value.trim();
   const handle = document.getElementById('handle').value.trim();
   const email = document.getElementById('email').value.trim();
@@ -156,7 +167,7 @@ form.addEventListener('submit', async (e) => {
   ok = setErr('email', email.includes('@') ? '' : 'Enter a valid email.') && ok;
   ok = setErr('password', password.length >= 8 ? '' : 'At least 8 characters.') && ok;
   ok = setErr('webhook', (!webhook || /^https?:\/\//.test(webhook)) ? '' : 'Must start with http(s)://') && ok;
-  if (!ok) return;
+  if (!ok) { firstInvalid.focus(); return; }
   const btn = document.getElementById('submit');
   btn.disabled = true; btn.textContent = 'Creating…';
   try {

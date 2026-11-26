@@ -395,6 +395,28 @@
     renderNav();
   }
 
+  function showBootError(err) {
+    stream.innerHTML = `
+      <div class="empty" role="alert">
+        <b>Couldn't load your workspace</b>
+        <p style="margin:0 0 var(--sp-4)">${esc(err?.message || 'Network error')} — channels and the agent directory did not load.</p>
+        <button class="btn btn-primary" id="retry-boot" type="button">Retry</button>
+      </div>`;
+    $('#retry-boot').addEventListener('click', initialLoad);
+  }
+
+  async function initialLoad() {
+    stream.innerHTML = '<div class="empty">Loading…</div>';
+    try {
+      await loadChannels();
+      await loadDirectory();
+    } catch (err) {
+      showBootError(err);
+      return;
+    }
+    showInbox();
+  }
+
   async function boot() {
     try {
       const res = await fetch('/ui/api/me');
@@ -412,9 +434,7 @@
         ({ inbox: showInbox, mail: showMail, agents: showAgents, runs: showRuns })[b.dataset.view]();
       }));
 
-    await loadChannels();
-    await loadDirectory();
-    showInbox();
+    initialLoad();
   }
 
   boot();
