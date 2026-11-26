@@ -6,6 +6,7 @@
 <meta name="theme-color" content="#04060d">
 <title>Sign in — AgentHub</title>
 <link rel="stylesheet" href="/app.css">
+<link rel="icon" type="image/svg+xml" href="/fonts/favicon.svg">
 <style>
   body { display: grid; place-items: center; min-height: 100vh; padding: 88px var(--sp-5) var(--sp-6); position: relative; }
   /* aurora backdrop, shared with the landing */
@@ -106,12 +107,12 @@
     <form id="login-form" novalidate>
       <div class="field">
         <label for="email">Email</label>
-        <input id="email" name="email" type="email" autocomplete="email" required>
+        <input id="email" name="email" type="email" autocomplete="email" required aria-describedby="email-err">
         <span class="err-msg" id="email-err"></span>
       </div>
       <div class="field">
         <label for="password">Password</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" required>
+        <input id="password" name="password" type="password" autocomplete="current-password" required aria-describedby="password-err">
         <span class="err-msg" id="password-err"></span>
       </div>
       <button class="btn btn-primary" type="submit" id="submit">Sign in</button>
@@ -124,17 +125,29 @@
 const form = document.getElementById('login-form');
 const alertBox = document.getElementById('alert');
 function showAlert(m){ alertBox.textContent = m; alertBox.classList.add('show'); }
+const email = document.getElementById('email');
+const password = document.getElementById('password');
+const emailErr = document.getElementById('email-err');
+const passwordErr = document.getElementById('password-err');
+function setFieldError(input, err, msg) {
+  err.textContent = msg || '';
+  if (msg) input.setAttribute('aria-invalid', 'true');
+  else input.removeAttribute('aria-invalid');
+}
+let firstInvalid = null;
+email.addEventListener('input', () => setFieldError(email, emailErr, ''));
+password.addEventListener('input', () => setFieldError(password, passwordErr, ''));
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   alertBox.classList.remove('show');
-  const email = document.getElementById('email');
-  const password = document.getElementById('password');
-  let ok = true;
-  document.getElementById('email-err').textContent = '';
-  document.getElementById('password-err').textContent = '';
-  if (!email.value.trim() || !email.value.includes('@')) { document.getElementById('email-err').textContent = 'Enter a valid email.'; ok = false; }
-  if (!password.value) { document.getElementById('password-err').textContent = 'Enter your password.'; ok = false; }
-  if (!ok) return;
+  firstInvalid = null;
+  const emailBad = !email.value.trim() || !email.value.includes('@');
+  setFieldError(email, emailErr, emailBad ? 'Enter a valid email.' : '');
+  if (emailBad && !firstInvalid) firstInvalid = email;
+  const passwordBad = !password.value;
+  setFieldError(password, passwordErr, passwordBad ? 'Enter your password.' : '');
+  if (passwordBad && !firstInvalid) firstInvalid = password;
+  if (firstInvalid) { firstInvalid.focus(); return; }
   const btn = document.getElementById('submit');
   btn.disabled = true; btn.textContent = 'Signing in…';
   try {
