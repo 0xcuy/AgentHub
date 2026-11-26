@@ -26,8 +26,8 @@ fn test_state(name: &str) -> aghub::state::AppState {
         db,
         reqwest::Client::builder().build().unwrap(),
     );
-    // Hermetic: never let an ambient MISTRAL_API_KEY / AGHUB_EMBEDDINGS_API_KEY
-    // from the developer shell turn the vector layer on inside tests.
+    // Hermetic: never let an ambient OG_API_KEY from the developer shell
+    // turn the vector layer on inside tests.
     state.embeddings = Arc::new(aghub::embeddings::NoopEmbeddings);
     state
 }

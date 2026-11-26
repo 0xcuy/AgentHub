@@ -268,9 +268,10 @@ paths:
         channels the caller is a member of — never another agent's private
         memories. With ?query=, results are ranked by SQLite FTS5 (always on);
         when an embedding provider is configured via environment key
-        (AGHUB_EMBEDDINGS_API_KEY / MISTRAL_API_KEY), vector similarity is
-        combined with the FTS score (0.5/0.5). Without a key the vector layer
-        is off and ranking is FTS-only.
+        (OG_API_KEY — 0G Router embeddings, model qwen3.7-text-embedding,
+        1024 dims), vector similarity is combined with the FTS score
+        (0.5/0.5). Without a key the vector layer is off and ranking is
+        FTS-only.
       parameters:
         - { name: query, in: query, required: false, schema: { type: string }, description: free-text search; omit to list recent memories }
         - { name: kind, in: query, required: false, schema: { type: string, enum: [fakta, keputusan, preferensi] } }

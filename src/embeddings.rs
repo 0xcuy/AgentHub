@@ -2,9 +2,8 @@
 //!
 //! FTS5 is always on and needs nothing. Vector search is opt-in: it only
 //! activates when a provider with a key is configured via the environment
-//! (`AGHUB_EMBEDDINGS_API_KEY` or `MISTRAL_API_KEY`). Without a key the
-//! `Noop` provider is used, the repo runs with zero external services, and
-//! no key is ever committed.
+//! (`OG_API_KEY`). Without a key the `Noop` provider is used, the repo runs
+//! with zero external services, and no key is ever committed.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -37,31 +36,39 @@ impl EmbeddingProvider for NoopEmbeddings {
     }
 }
 
-/// HTTP provider for the Mistral embeddings API. The key comes only from the
-/// environment; no key means the provider is never constructed.
-pub struct MistralEmbeddings {
+/// HTTP provider for the 0G Router embeddings API (OpenAI-compatible).
+/// The key comes only from the environment (`OG_API_KEY`); no key means the
+/// provider is never constructed.
+///
+/// Default model: `qwen3.7-text-embedding` (1024 dimensions). Other embedding
+/// models available on the router (override via `AGHUB_EMBEDDINGS_MODEL`, do
+/// not hardcode them as defaults): `qwen3-embedding-0.6b`, `qwen3-embedding-8b`.
+pub struct OgEmbeddings {
     pub client: reqwest::Client,
     pub url: String,
     pub key: String,
     pub model: String,
+    pub expected_dim: usize,
 }
 
-impl MistralEmbeddings {
+impl OgEmbeddings {
     fn from_env(http: reqwest::Client) -> Option<Self> {
-        let key = std::env::var("AGHUB_EMBEDDINGS_API_KEY")
-            .or_else(|_| std::env::var("MISTRAL_API_KEY"))
-            .ok()?;
+        let key = std::env::var("OG_API_KEY").ok()?;
         let url = std::env::var("AGHUB_EMBEDDINGS_URL")
-            .unwrap_or_else(|_| "https://api.mistral.ai/v1/embeddings".to_string());
+            .unwrap_or_else(|_| "https://router-api.0g.ai/v1/embeddings".to_string());
         let model = std::env::var("AGHUB_EMBEDDINGS_MODEL")
-            .unwrap_or_else(|_| "mistral-embed".to_string());
-        Some(Self { client: http, url, key, model })
+            .unwrap_or_else(|_| "qwen3.7-text-embedding".to_string());
+        let expected_dim = std::env::var("AGHUB_EMBEDDINGS_DIM")
+            .ok()
+            .and_then(|d| d.parse().ok())
+            .unwrap_or(1024);
+        Some(Self { client: http, url, key, model, expected_dim })
     }
 }
 
-impl EmbeddingProvider for MistralEmbeddings {
+impl EmbeddingProvider for OgEmbeddings {
     fn name(&self) -> &'static str {
-        "mistral"
+        "0g"
     }
     fn enabled(&self) -> bool {
         true
@@ -71,8 +78,9 @@ impl EmbeddingProvider for MistralEmbeddings {
         let url = self.url.clone();
         let key = self.key.clone();
         let model = self.model.clone();
+        let expected_dim = self.expected_dim;
         Box::pin(async move {
-            let body = serde_json::json!({ "model": model, "input": texts, "encoding_format": "float" });
+            let body = serde_json::json!({ "model": model, "input": texts });
             let resp = client
                 .post(&url)
                 .bearer_auth(&key)
@@ -92,12 +100,18 @@ impl EmbeddingProvider for MistralEmbeddings {
                 .ok_or_else(|| "embeddings response missing data".to_string())?;
             for item in items {
                 let index = item["index"].as_u64().unwrap_or(0) as usize;
-                let vector = item["embedding"]
+                let vector: Vec<f32> = item["embedding"]
                     .as_array()
                     .ok_or_else(|| "embeddings response missing vector".to_string())?
                     .iter()
                     .filter_map(|v| v.as_f64().map(|f| f as f32))
                     .collect();
+                if vector.len() != expected_dim {
+                    let dim = vector.len();
+                    return Err(format!(
+                        "embeddings API returned dimension {dim} for model '{model}', expected {expected_dim}"
+                    ));
+                }
                 out.push((index, vector));
             }
             out.sort_by_key(|(i, _)| *i);
@@ -153,9 +167,9 @@ impl EmbeddingProvider for StubEmbeddings {
 
 /// Build the provider from the environment. No key -> Noop (vector off).
 pub fn from_env(http: reqwest::Client) -> std::sync::Arc<dyn EmbeddingProvider> {
-    match MistralEmbeddings::from_env(http) {
+    match OgEmbeddings::from_env(http) {
         Some(p) => {
-            tracing::info!(model = %p.model, "vector search enabled via mistral embeddings");
+            tracing::info!(model = %p.model, dim = p.expected_dim, "vector search enabled via 0g router embeddings");
             std::sync::Arc::new(p)
         }
         None => std::sync::Arc::new(NoopEmbeddings),

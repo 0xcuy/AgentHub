@@ -43,10 +43,13 @@ token. Skor = bm25 dinormalisasi ke [0,1] atas himpunan kandidat (top = 1.0).
 - Trait `EmbeddingProvider` (`embed(&[String]) -> Vec<Vec<f32>>`) di
   `src/embeddings.rs`:
   - `NoopEmbeddings` — default, mati, tanpa key.
-  - `MistralEmbeddings` — HTTP ke Mistral embeddings API
-    (`AGHUB_EMBEDDINGS_API_KEY` atau `MISTRAL_API_KEY`; tanpa key provider
-    tidak pernah dibangun). URL/model bisa dioverride via
-    `AGHUB_EMBEDDINGS_URL` / `AGHUB_EMBEDDINGS_MODEL`. Key HANYA dari env,
+  - `OgEmbeddings` — HTTP ke 0G Router embeddings API
+    (`https://router-api.0g.ai/v1/embeddings`, OpenAI-compatible; key dari
+    `OG_API_KEY`; tanpa key provider tidak pernah dibangun). Model default
+    `qwen3.7-text-embedding` (1024 dimensi); model lain di router:
+    `qwen3-embedding-0.6b`, `qwen3-embedding-8b` (jangan hardcoded sebagai
+    default). URL/model/dimensi bisa dioverride via `AGHUB_EMBEDDINGS_URL` /
+    `AGHUB_EMBEDDINGS_MODEL` / `AGHUB_EMBEDDINGS_DIM`. Key HANYA dari env,
     tidak pernah di-commit.
   - `StubEmbeddings` — provider stub/mock deterministik (bag-of-token-hash)
     untuk tes.
@@ -67,7 +70,7 @@ Server TIDAK memanggil LLM. Ringkasan ditulis agent lewat API memory
 - `migrations/0004_memory.sql` (baru) — tabel `memories`, `memories_fts`
   (FTS5), `memory_embeddings`.
 - `src/api/memory.rs` (baru) — handler POST/GET/DELETE + ranking FTS5/vector.
-- `src/embeddings.rs` (baru) — trait provider, Noop/Mistral/Stub, cosine,
+- `src/embeddings.rs` (baru) — trait provider, Noop/0G/Stub, cosine,
   blob f32 helper.
 - `src/state.rs` — `memory_cap` (dari env) + `embeddings` (dari env) di
   `AppState::new`.
@@ -104,7 +107,7 @@ langganan/billing, service live (3001). Tidak ada secret/key di repo.
 
 ## Bukti curl (server port 3003, DB scratch /tmp/aghub-mem-verify.db)
 Server dijalankan dengan `AGHUB_MEMORY_CAP_PER_AGENT=3` dan TANPA key
-embedding (`MISTRAL_API_KEY`/`AGHUB_EMBEDDINGS_API_KEY` dihapus dari env) —
+embedding (`OG_API_KEY` tidak di-set) —
 log start: `memory enabled, cap=3, provider=noop` (vector mati tanpa key).
 
 Ringkasan (output lengkap terlampir di bawah):
@@ -163,12 +166,13 @@ HTTP 404
 ```
 
 ## Catatan
-- **Provider Mistral pernah teruji hidup tidak sengaja** saat run verifikasi
-  pertama (env shell VPS mengandung `MISTRAL_API_KEY` dan `env -u` awal
-  kurang tepat scope-nya): dengan key, `vector_search:true`, memory tanpa
-  match leksikal muncul via cosine — jalur HTTP provider terbukti berfungsi.
-  Bukti resmi di atas dijalankan TANPA key (provider=noop). Key tidak
-  pernah ditulis ke repo.
+- **Provider vector diganti ke 0G Router (run 2).** Sebelumnya provider HTTP
+  memakai Mistral embeddings; sekarang `OgEmbeddings` ke
+  `https://router-api.0g.ai/v1/embeddings` dengan key `OG_API_KEY`, model
+  default `qwen3.7-text-embedding` (1024 dimensi). Provider menolak dengan
+  error jelas bila API mengembalikan dimensi != yang diharapkan; dim tetap
+  disimpan per baris (`memory_embeddings.dim`) dan cosine menolak pasangan
+  dimensi beda — tidak ada asumsi kaku 1024 di jalur query.
 - **Model lokal di-skip:** jalur bersih untuk ONNX/model lokal di Rust
   (ort/candle + file model) menambah dependensi berat dan artefak download —
   tidak sepadan untuk tahap ini, sesuai brief "jangan dipaksakan kalau ribet".
@@ -183,3 +187,43 @@ HTTP 404
   jumlahnya) — untuk skala AgentHub sekarang memadai, bisa ditambah
   indexing ANN nanti bila volume memory membesar.
 - MEMORY-BRIEF.md sengaja tidak di-commit (panduan internal, bukan isi repo).
+
+## Run 2 — provider vector diganti ke 0G Router embeddings
+Perintah owner (26 Nov 2026 ~20:27 WIB): ganti provider Mistral ke 0G Router.
+Tidak ada perubahan API, FTS5, cap, atau perilaku lain.
+
+### Perubahan
+- `src/embeddings.rs` — `MistralEmbeddings` diganti `OgEmbeddings`:
+  `POST https://router-api.0g.ai/v1/embeddings`, body OpenAI-compatible
+  (`{"model": ..., "input": [...]}`), response `data[].embedding`.
+  Key HANYA dari env `OG_API_KEY`; tanpa key provider tidak dibangun (Noop,
+  vector mati, FTS5 saja — default tidak berubah).
+  Model default `qwen3.7-text-embedding` (1024 dimensi). Model embedding lain
+  di router (catatan saja, tidak di-hardcode sebagai default):
+  `qwen3-embedding-0.6b`, `qwen3-embedding-8b`.
+  Override opsional: `AGHUB_EMBEDDINGS_URL` / `AGHUB_EMBEDDINGS_MODEL` /
+  `AGHUB_EMBEDDINGS_DIM`. Bila API mengembalikan dimensi != yang diharapkan,
+  provider menolak dengan error jelas; dim tetap disimpan per baris dan
+  cosine menolak pasangan dimensi beda — tidak ada asumsi kaku 1024 di query.
+- `tests/memory.rs` — komentar hermetic kini menyebut `OG_API_KEY`.
+- `MEMORY-REPORT.md`, `openapi.yaml` — dokumentasi provider ke 0G/`OG_API_KEY`.
+- Tidak ada key di repo, log, atau output tes. Key 0G dibaca langsung dari
+  droplet ke env proses tes saja.
+
+### Hasil tes run 2
+- `cargo test` penuh: 20 tes hijau (4 unit embeddings + 10 api + 6 memory).
+- `cargo build --release`: bersih.
+- Tes live 0G (server port 3003, DB scratch /tmp, key dari droplet ke env
+  proses — tidak pernah ditampilkan/ditulis):
+  - Log start: `vector search enabled via 0g router embeddings model=qwen3.7-text-embedding dim=1024`, `provider=0g`.
+  - Probe langsung router: HTTP 200, batch 2 teks, dim [1024, 1024].
+  - 3 memory private disimpan; `memory_embeddings`: dim=1024, blob 4096 byte
+    per baris.
+  - Query semantic TANPA overlap leksikal ("mesin basis data apa yang dipakai
+    untuk penyimpanan") → `vector_search:true`, top: "Sekar memilih SQLite
+    karena AgentHub sudah memakainya" score 0.2508 — murni lewat vector.
+  - Query lexical ("memilih SQLite") → `vector_search:true`, top score 0.8761
+    (gabungan FTS+vector).
+  - PEMBANDING tanpa `OG_API_KEY` (server restart, provider=noop): query
+    semantic sama → `{"memories":[],"vector_search":false}`; query lexical
+    → tetap ketemu via FTS5 saja (score 1.0).
