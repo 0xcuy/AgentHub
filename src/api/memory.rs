@@ -383,6 +383,17 @@ pub async fn search(
     }
 
     // --- combine: FTS5 + vector, simple weighted sum, then re-rank ---
+    // With the vector layer on, an absolute minimum score filters weak
+    // matches: every embedded memory is scanned, so any cosine above 0.0
+    // enters otherwise (noise measured ~0.13 combined, genuine semantic-only
+    // matches ~0.25). FTS-only ranking is left alone — its scores are
+    // normalized relative to the candidate set (top hit = 1.0), so an
+    // absolute floor there would hide real secondary matches.
+    let min_score = if vector_on {
+        state.memory_min_score
+    } else {
+        0.0
+    };
     let mut ranked: Vec<(f64, Memory)> = hits
         .into_values()
         .filter_map(|(memory, fts, vec)| {
@@ -396,6 +407,7 @@ pub async fn search(
             Some((score, memory))
         })
         .filter(|(score, _)| *score > 0.0)
+        .filter(|(score, _)| *score >= min_score)
         .collect();
     ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap().then(b.1.id.cmp(&a.1.id)));
     ranked.truncate(limit as usize);

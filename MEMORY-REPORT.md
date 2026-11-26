@@ -227,3 +227,61 @@ Tidak ada perubahan API, FTS5, cap, atau perilaku lain.
   - PEMBANDING tanpa `OG_API_KEY` (server restart, provider=noop): query
     semantic sama → `{"memories":[],"vector_search":false}`; query lexical
     → tetap ketemu via FTS5 saja (score 1.0).
+
+## Run 3 — minimum-score cutoff untuk recall (AGHUB_MEMORY_MIN_SCORE)
+
+### Temuan (26 Nov 2026 ~21:00 WIB)
+Tes live Fable: `GET /v1/memory?query=reviewer` mengembalikan memory yang
+tidak relevan dengan score ~0.13. Recall tidak punya skor minimum — setiap
+memory ber-embedding ikut discan dan cosine apa pun di atas 0.0 masuk hasil.
+Skor terukur (live 0G, run 2): query semantic murni tanpa overlap leksikal →
+0.2508 combined (cosine ~0.50); noise → ~0.13 combined (cosine ~0.26); query
+lexical → 0.8761; FTS-only tanpa key → 1.0.
+
+### Desain cutoff
+- Cutoff diterapkan HANYA saat layer vector aktif (`vector_search:true`),
+  sebagai filter skor gabungan: `score >= AGHUB_MEMORY_MIN_SCORE`.
+- Default 0.2 — dipilih dari skor terukur, bukan menyalin saran 0.3:
+  0.2 combined = floor cosine 0.40, jadi noise (cosine ~0.26 → ~0.13
+  combined) gugur dan match semantic genuine (cosine ~0.50 → 0.2508)
+  lolos. Cutoff 0.3 justru mematikan match 0.2508 itu.
+- Ranking FTS-only (tanpa key) TIDAK dipotong: skor FTS dinormalisasi
+  relatif terhadap kandidat (match terbaik = 1.0), sehingga floor absolut
+  di sana menyembunyikan match kedua yang sah. Kasus noise Fable hanya
+  muncul lewat cosine (semua embedding discan), bukan lewat FTS.
+- Listing tanpa `?query=` tidak berubah: list terbaru, `score: null`.
+- Env var mengikuti pola `AGHUB_MEMORY_CAP_PER_AGENT` di `src/state.rs`:
+  const default `DEFAULT_MEMORY_MIN_SCORE` (0.2), parsing
+  `parse_memory_min_score` (0.0-1.0, trim), fallback ke default + warning
+  bila nilai tidak valid.
+- Angka diverifikasi dengan stub provider di tes (FNV-1a bag-of-words,
+  dim 64, tanpa tabrakan bucket antar token tes): corpus A "alpha suka kopi
+  pagi enak", B "kebab margonda buka suka"; query "suka kopi banget" →
+  cosine(A)=0.5164 → 0.2582 combined (lolos), cosine(B)=0.2887 → 0.1443
+  (gugur); query "pagi mendung hujan" → cosine(A)=0.2582 → 0.1291 (gugur).
+  Pasangan stub 0.2582/0.1443/0.1291 memotong 0.2 dengan arah yang sama
+  seperti pasangan live 0.2508/0.13.
+
+### Perubahan file
+- `src/state.rs` — `memory_min_score` di `AppState`, `DEFAULT_MEMORY_MIN_SCORE`,
+  `parse_memory_min_score`, `memory_min_score_from_env`; log start kini juga
+  mencetak `min_score`.
+- `src/api/memory.rs` — filter `score >= min_score` di combine ranking
+  (`search`), aktif hanya saat vector on.
+- `tests/memory.rs` — 4 tes baru (di bawah).
+- `openapi.yaml` — GET /v1/memory: perilaku cutoff + env var didokumentasikan.
+
+### Tes baru (tests/memory.rs)
+- `memory_recall_min_score_drops_unrelated` — kasus Fable: memory ada,
+  query tidak match bermakna → list kosong.
+- `memory_recall_keeps_lexical_match_under_cutoff` — query lexical tetap
+  ketemu (FTS+vector 0.7236; hit FTS-only dari prefix query 0.5 juga lolos).
+- `memory_recall_keeps_semantic_match_under_cutoff` — query semantic murni
+  tetap ketemu (0.2582), kandidat lemah (0.1443) gugur.
+- `memory_recall_min_score_env_var` — parsing valid/invalid, default 0.2;
+  cutoff lebih ketat (0.5) menggugurkan 0.2582, lebih longgar (0.1)
+  menyelamatkan 0.1443 dan 0.2582.
+
+### Hasil tes run 3
+- `cargo test` penuh: 28 tes hijau, 0 gagal (4 unit embeddings + 10 api +
+  10 memory).

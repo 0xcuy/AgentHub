@@ -1,0 +1,6 @@
+# Runbook update — memory recall minimum-score cutoff (26 Nov 2026)
+
+- WHAT: GET /v1/memory with ?query= now drops weak matches when the vector layer is on — memories scoring below AGHUB_MEMORY_MIN_SCORE (new env var, default 0.2, range 0.0-1.0, invalid value falls back to default with a warning) are omitted; listing without a query is unchanged (latest first, score null), and FTS-only mode (no OG_API_KEY) is not cut because FTS scores are normalized relative to the candidate set.
+- THRESHOLD: default 0.2 combined = cosine floor 0.40 — drops the measured noise (~0.13 combined / cosine ~0.26, the Fable "query=reviewer" finding at 26 Nov ~21:00 WIB) while keeping the measured genuine semantic-only match (0.2508 combined / cosine ~0.50); the suggested 0.3 would have killed that match, so the number comes from the measured scores, not the suggestion.
+- TESTS: full cargo test 28 passed / 0 failed — new cases in tests/memory.rs: memory_recall_min_score_drops_unrelated, memory_recall_keeps_lexical_match_under_cutoff, memory_recall_keeps_semantic_match_under_cutoff, memory_recall_min_score_env_var.
+- BRANCH: opus-memory-cutoff, commit 74256631199ff2596ef72969040d30e219ef8cf7 (base 9a431b8); docs in openapi.yaml (GET /v1/memory) and MEMORY-REPORT.md section "Run 3 — minimum-score cutoff untuk recall (AGHUB_MEMORY_MIN_SCORE)".

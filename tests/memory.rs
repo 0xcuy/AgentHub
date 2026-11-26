@@ -502,3 +502,130 @@ async fn memory_vector_layer_with_stub_and_off_without_key() {
         .unwrap();
     assert_eq!(fts_left, 0, "delete must remove the FTS row too");
 }
+
+// --- recall minimum-score cutoff (AGHUB_MEMORY_MIN_SCORE; default 0.2) ---
+//
+// With the vector layer on, every embedded memory is scanned and any cosine
+// above 0.0 enters the results; the live 0G run measured noise (unrelated
+// memories) at ~0.13 combined and a genuine semantic-only match at ~0.2508,
+// so the default 0.2 (= cosine floor 0.40) drops the noise and keeps the
+// match. Stub-provider stand-ins, measured with the FNV-1a bag-of-words
+// stub (dim 64, no bucket collisions between these tokens):
+//   A = "alpha suka kopi pagi enak"
+//   B = "kebab margonda buka suka"
+//   query "suka kopi banget":  cos(A)=0.5164 -> 0.2582 | cos(B)=0.2887 -> 0.1443
+//   query "pagi mendung hujan": cos(A)=0.2582 -> 0.1291 (pure noise)
+//   query "kopi":              cos(A)=0.4472, FTS=1.0 -> 0.7236 (FTS+vec)
+#[tokio::test]
+async fn memory_recall_min_score_drops_unrelated() {
+    let mut state = test_state("minscore-noise");
+    state.embeddings = Arc::new(aghub::embeddings::StubEmbeddings { dim: 64 });
+    let router = aghub::api::build_router(state.clone());
+
+    let (_a, t1) = register(&router, "alpha").await;
+    remember(&router, &t1, json!({ "content": "alpha suka kopi pagi enak", "kind": "preferensi" })).await;
+    remember(&router, &t1, json!({ "content": "kebab margonda buka suka", "kind": "fakta" })).await;
+
+    // the Fable case: memories exist, the query matches none of them
+    // meaningfully (only weak stub cosine ~0.13 / ~0.0), so recall is empty
+    let (status, v) = call(&router, "GET", "/v1/memory?query=pagi+mendung+hujan", Some(&t1), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["vector_search"], true);
+    let items = v["memories"].as_array().unwrap();
+    assert_eq!(items.len(), 0, "unrelated query must not surface weak noise: {v}");
+}
+
+#[tokio::test]
+async fn memory_recall_keeps_lexical_match_under_cutoff() {
+    let mut state = test_state("minscore-lex");
+    state.embeddings = Arc::new(aghub::embeddings::StubEmbeddings { dim: 64 });
+    let router = aghub::api::build_router(state.clone());
+
+    let (_a, t1) = register(&router, "alpha").await;
+    remember(&router, &t1, json!({ "content": "alpha suka kopi pagi enak", "kind": "preferensi" })).await;
+    remember(&router, &t1, json!({ "content": "kebab margonda buka suka", "kind": "fakta" })).await;
+
+    // lexical query "kopi": full FTS match for the kopi memory (FTS=1.0 +
+    // vector half, 0.7236 combined); the kebab memory has no FTS hit but
+    // shares "suka" via stub cosine (0.1443 combined < 0.2, dropped)
+    let (status, v) = call(&router, "GET", "/v1/memory?query=kopi", Some(&t1), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["vector_search"], true);
+    let items = v["memories"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{v}");
+    assert!(items[0]["content"].as_str().unwrap().contains("kopi"), "{v}");
+    let score = items[0]["score"].as_f64().unwrap();
+    assert!((score - 0.7236).abs() < 0.0001, "FTS+vector combined score: {v}");
+
+    // FTS-only-half hit under the vector layer: the prefix query "kop"
+    // matches "kopi" in FTS5 but is not a token of any memory, so its stub
+    // cosine is 0 and the score is 0.5 * fts = 0.5 — must survive the cutoff
+    let (status, v) = call(&router, "GET", "/v1/memory?query=kop", Some(&t1), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let items = v["memories"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "lexical-only match must not be cut: {v}");
+    assert!(items[0]["content"].as_str().unwrap().contains("kopi"), "{v}");
+    assert!((items[0]["score"].as_f64().unwrap() - 0.5).abs() < 0.0001, "{v}");
+}
+
+#[tokio::test]
+async fn memory_recall_keeps_semantic_match_under_cutoff() {
+    let mut state = test_state("minscore-sem");
+    state.embeddings = Arc::new(aghub::embeddings::StubEmbeddings { dim: 64 });
+    let router = aghub::api::build_router(state.clone());
+
+    let (_a, t1) = register(&router, "alpha").await;
+    remember(&router, &t1, json!({ "content": "alpha suka kopi pagi enak", "kind": "preferensi" })).await;
+    remember(&router, &t1, json!({ "content": "kebab margonda buka suka", "kind": "fakta" })).await;
+
+    // semantic-only query: no FTS5 match (AND semantics) for either memory;
+    // the genuine match (stub cosine 0.5164 -> 0.2582 combined) must survive
+    // the 0.2 cutoff while the weak one (0.1443) is dropped — this is exactly
+    // what a naive 0.3 combined cutoff would have killed
+    let (status, v) = call(&router, "GET", "/v1/memory?query=suka+kopi+banget", Some(&t1), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["vector_search"], true);
+    let items = v["memories"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "exactly the genuine semantic match survives: {v}");
+    assert!(items[0]["content"].as_str().unwrap().contains("kopi pagi enak"), "{v}");
+    let score = items[0]["score"].as_f64().unwrap();
+    assert!((score - 0.2582).abs() < 0.0001, "combined = 0.5 * cosine: {v}");
+}
+
+#[tokio::test]
+async fn memory_recall_min_score_env_var() {
+    // env parsing: same helper shape as parse_memory_cap
+    assert_eq!(aghub::state::DEFAULT_MEMORY_MIN_SCORE, 0.2);
+    assert!((aghub::state::parse_memory_min_score("0.35").unwrap() - 0.35).abs() < 1e-9);
+    assert!((aghub::state::parse_memory_min_score(" 0.1 ").unwrap() - 0.1).abs() < 1e-9);
+    assert!((aghub::state::parse_memory_min_score("0").unwrap()).abs() < 1e-9);
+    assert!((aghub::state::parse_memory_min_score("1").unwrap() - 1.0).abs() < 1e-9);
+    assert!(aghub::state::parse_memory_min_score("x").is_err());
+    assert!(aghub::state::parse_memory_min_score("-0.1").is_err());
+    assert!(aghub::state::parse_memory_min_score("1.01").is_err());
+
+    // behaviour: with the same corpus, a stricter cutoff drops the borderline
+    // semantic match and a lenient one keeps both
+    let build = |name: &str, min_score: f64| {
+        let mut state = test_state(name);
+        state.embeddings = Arc::new(aghub::embeddings::StubEmbeddings { dim: 64 });
+        state.memory_min_score = min_score;
+        let router = aghub::api::build_router(state.clone());
+        (router, state)
+    };
+    let (router, _s) = build("minscore-strict", 0.5);
+    let (_a, t1) = register(&router, "alpha").await;
+    remember(&router, &t1, json!({ "content": "alpha suka kopi pagi enak", "kind": "preferensi" })).await;
+    remember(&router, &t1, json!({ "content": "kebab margonda buka suka", "kind": "fakta" })).await;
+    let (status, v) = call(&router, "GET", "/v1/memory?query=suka+kopi+banget", Some(&t1), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["memories"].as_array().unwrap().len(), 0, "stricter cutoff must drop the 0.2582 match: {v}");
+
+    let (router2, _s2) = build("minscore-lenient", 0.1);
+    let (_b, t2) = register(&router2, "alpha").await;
+    remember(&router2, &t2, json!({ "content": "alpha suka kopi pagi enak", "kind": "preferensi" })).await;
+    remember(&router2, &t2, json!({ "content": "kebab margonda buka suka", "kind": "fakta" })).await;
+    let (status, v) = call(&router2, "GET", "/v1/memory?query=suka+kopi+banget", Some(&t2), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["memories"].as_array().unwrap().len(), 2, "lenient cutoff must keep both (0.2582 and 0.1443): {v}");
+}

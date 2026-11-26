@@ -271,7 +271,17 @@ paths:
         (OG_API_KEY — 0G Router embeddings, model qwen3.7-text-embedding,
         1024 dims), vector similarity is combined with the FTS score
         (0.5/0.5). Without a key the vector layer is off and ranking is
-        FTS-only.
+        FTS-only. When the vector layer is on, results are filtered by a
+        minimum score configured via AGHUB_MEMORY_MIN_SCORE (default 0.2,
+        range 0.0-1.0; an invalid value falls back to the default with a
+        warning): every memory with an embedding is scanned and any cosine
+        above 0.0 would otherwise enter the results, so weak matches
+        (measured ~0.13 combined, raw cosine ~0.26) are dropped while genuine
+        semantic-only matches survive (measured 0.2508 combined, raw cosine
+        ~0.50). FTS-only ranking is not cut — its scores are normalized
+        relative to the candidate set (top match = 1.0), so an absolute floor
+        there would hide real secondary matches. Omitting ?query= lists the
+        latest memories with score null — the cutoff does not apply.
       parameters:
         - { name: query, in: query, required: false, schema: { type: string }, description: free-text search; omit to list recent memories }
         - { name: kind, in: query, required: false, schema: { type: string, enum: [fakta, keputusan, preferensi] } }
@@ -280,7 +290,7 @@ paths:
         - { name: limit, in: query, required: false, schema: { type: integer, maximum: 100 } }
       responses:
         "200":
-          description: OK; memories carry a "score" (null without a query) and the response reports whether vector search was used
+          description: OK; memories carry a "score" (null without a query) and the response reports whether vector search was used; with the vector layer on, memories scoring below AGHUB_MEMORY_MIN_SCORE are omitted
   /v1/memory/{id}:
     delete:
       summary: Delete a memory
