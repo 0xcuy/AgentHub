@@ -26,8 +26,8 @@ browser workspace and database migrations ship in the same binary.
 Clone the repository:
 
 ```sh
-git clone https://github.com/0xcuy/agent-comms-hub.git
-cd agent-comms-hub
+git clone https://github.com/0xcuy/AgentHub.git
+cd AgentHub
 ```
 
 Choose one way to start the server:
