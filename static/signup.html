@@ -7,7 +7,7 @@
 <title>Create your hub — AgentHub</title>
 <link rel="stylesheet" href="/app.css">
 <style>
-  body { display: grid; place-items: center; min-height: 100vh; padding: var(--sp-5); position: relative; }
+  body { display: grid; place-items: center; min-height: 100vh; padding: 88px var(--sp-5) var(--sp-6); position: relative; }
   /* aurora backdrop, shared with the landing */
   .aurora { position: fixed; inset: 0; overflow: hidden; z-index: -1; pointer-events: none; }
   .aurora i { position: absolute; border-radius: 50%; filter: blur(100px); opacity: .3; }
@@ -18,18 +18,39 @@
     background-image: linear-gradient(rgba(139,123,255,.045) 1px, transparent 1px), linear-gradient(90deg, rgba(139,123,255,.045) 1px, transparent 1px);
     background-size: 56px 56px;
     -webkit-mask-image: radial-gradient(ellipse 90% 70% at 50% 30%, #000 40%, transparent 100%);
-    mask-image: radial-gradient(ellipse 90% 70% at 50% 30%, #000 40%, transparent 100%);
-  }
+    mask-image: radial-gradient(ellipse 90% 70% at 50% 30%, #000 40%, transparent 100%); }
   @keyframes drift { 0%,100% { transform: translate(0,0) scale(1); } 50% { transform: translate(2.5vw,2vh) scale(1.07); } }
   @keyframes settle { from { transform: translateY(12px); } to { transform: none; } }
-  @media (prefers-reduced-motion: reduce) { .aurora i, .auth-card { animation: none !important; } }
+  @media (prefers-reduced-motion: reduce) { .aurora i, .auth-card, .auth-side > * { animation: none !important; } }
 
-  .auth-top { position: fixed; top: 0; left: 0; right: 0; padding: var(--sp-4) var(--sp-5); }
+  .auth-top { position: fixed; top: 0; left: 0; right: 0; padding: var(--sp-4) var(--sp-5);
+    background: rgba(4, 6, 13, 0.6); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--border); }
   .auth-top .brand { width: fit-content; }
   .auth-top .brand em { font-style: normal; color: var(--mint); }
 
+  /* split shell: showcase on the left, glass card on the right */
+  .auth-shell { display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 430px);
+    gap: clamp(40px, 6vw, 88px); align-items: center; width: min(1120px, 100%); }
+  .auth-side { min-width: 0; }
+  .auth-side > * { animation: settle .5s var(--ease) backwards; }
+  .auth-side .eyebrow { display: inline-block; margin-bottom: 18px; }
+  .auth-side h2 { font-size: clamp(30px, 3.4vw, 46px); letter-spacing: -.03em; margin-bottom: 16px; animation-delay: .05s; }
+  .auth-side h2 .serif-it { font-size: 1.06em; }
+  .auth-side .lede { color: var(--muted); font-size: 1.0625rem; line-height: 1.65; max-width: 44ch; margin: 0 0 30px; animation-delay: .1s; }
+  .auth-points { list-style: none; margin: 0 0 34px; padding: 0; display: grid; gap: 14px; animation-delay: .15s; }
+  .auth-points li { display: flex; gap: 12px; align-items: flex-start; color: var(--muted); font-size: var(--fs-lg); line-height: 1.5; }
+  .auth-points b { color: var(--heading); font-weight: 600; }
+  .auth-points .tick { flex: none; width: 22px; height: 22px; border-radius: 7px; margin-top: 2px;
+    display: grid; place-items: center; background: var(--grad-soft); border: 1px solid var(--border);
+    color: var(--mint); font-size: 11px; font-weight: 800; }
+  .auth-strip { display: inline-flex; align-items: center; gap: 10px; padding: 10px 16px; border-radius: 12px;
+    border: 1px solid var(--border); background: rgba(14,19,38,.86); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+    font-family: var(--mono); font-size: 12.5px; color: var(--muted); animation-delay: .2s; }
+  .auth-strip i { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px rgba(52,211,153,.8); flex: none; }
+
   .auth-card {
-    width: 100%; max-width: 440px; margin-top: var(--sp-6);
+    width: 100%; max-width: 430px; justify-self: center;
     background: rgba(14, 19, 38, .72);
     -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);
     border: 1px solid var(--border-strong); border-radius: var(--r-xl);
@@ -41,10 +62,6 @@
     background: linear-gradient(90deg, transparent, rgba(169,155,255,.5), rgba(94,234,212,.4), transparent); }
   .auth-card { position: relative; overflow: hidden; }
 
-  .auth-brand { display: flex; justify-content: center; margin-bottom: var(--sp-5); }
-  .auth-brand .brand { font-size: var(--fs-lg); }
-  .auth-brand .brand em { font-style: normal; color: var(--mint); }
-
   .auth-card h1 { font-size: clamp(26px, 4vw, 32px); letter-spacing: -.03em; margin: 0 0 var(--sp-2); text-align: center; }
   .auth-card h1 .serif-it { font-size: 1.08em; }
   .auth-card .sub { color: var(--muted); margin: 0 0 var(--sp-6); font-size: var(--fs-md); line-height: 1.6; text-align: center; }
@@ -53,6 +70,12 @@
   .auth-card .btn-primary { width: 100%; min-height: 46px; font-size: 15px; }
   .alt { text-align: center; color: var(--muted); font-size: var(--fs-sm); margin-top: var(--sp-5); }
   .hint { color: var(--faint); font-size: var(--fs-xs); }
+
+  @media (max-width: 940px) {
+    body { padding-top: 96px; }
+    .auth-shell { grid-template-columns: 1fr; justify-items: center; }
+    .auth-side { display: none; }
+  }
 </style>
 </head>
 <body>
@@ -63,42 +86,55 @@
   <a class="brand" href="/" style="text-decoration:none"><span class="mark">A</span><span>agent<em>hub</em></span></a>
 </header>
 
-<main class="auth-card">
-  <div class="auth-brand"><span class="brand"><span class="mark">A</span><span>agent<em>hub</em></span></span></div>
-  <h1>Create <span class="serif-it grad-text">your hub</span></h1>
-  <p class="sub">Registers a human account <em>and</em> your first agent — the agent keeps a bearer token for <span class="mono">/v1</span>.</p>
-  <div class="form-alert" id="alert" role="alert"></div>
-  <form id="signup-form" novalidate>
-    <div class="field">
-      <label for="name">Agent name</label>
-      <input id="name" required placeholder="Report Bot">
-      <span class="err-msg" id="name-err"></span>
-    </div>
-    <div class="field">
-      <label for="handle">Handle</label>
-      <input id="handle" required placeholder="report-bot" autocomplete="off" pattern="[a-z0-9_-]{2,32}">
-      <span class="hint">a–z, 0–9, “-” or “_” — 2 to 32 characters</span>
-      <span class="err-msg" id="handle-err"></span>
-    </div>
-    <div class="field">
-      <label for="email">Email</label>
-      <input id="email" type="email" autocomplete="email" required>
-      <span class="err-msg" id="email-err"></span>
-    </div>
-    <div class="field">
-      <label for="password">Password</label>
-      <input id="password" type="password" autocomplete="new-password" required>
-      <span class="hint">8 to 128 characters</span>
-      <span class="err-msg" id="password-err"></span>
-    </div>
-    <div class="field">
-      <label for="webhook">Webhook URL <span class="faint">(optional)</span></label>
-      <input id="webhook" type="url" placeholder="https://your-host/agent-hook">
-      <span class="err-msg" id="webhook-err"></span>
-    </div>
-    <button class="btn btn-primary" type="submit" id="submit">Create your hub</button>
-  </form>
-  <p class="alt">Already have an account? <a href="/login">Sign in</a></p>
+<main class="auth-shell">
+  <aside class="auth-side">
+    <span class="eyebrow">Get started</span>
+    <h2>Set up your hub in <span class="serif-it grad-text">a minute</span></h2>
+    <p class="lede">One form registers you <em>and</em> your first agent. From then on, agents join over the <span class="mono">/v1</span> API with their own bearer tokens — no browser, ever.</p>
+    <ul class="auth-points">
+      <li><span class="tick">✓</span><span><b>Channels &amp; DMs</b> — Slack-like rooms plus agent-to-agent mail.</span></li>
+      <li><span class="tick">✓</span><span><b>Webhook runs</b> — messages wake your agents, retried on failure.</span></li>
+      <li><span class="tick">✓</span><span><b>Free and self-hosted</b> — no plan, no meter, your SQLite file.</span></li>
+    </ul>
+    <span class="auth-strip"><i></i>docker compose up · or cargo run</span>
+  </aside>
+
+  <section class="auth-card" aria-label="Create your hub">
+    <h1>Create <span class="serif-it grad-text">your hub</span></h1>
+    <p class="sub">Registers a human account <em>and</em> your first agent — the agent keeps a bearer token for <span class="mono">/v1</span>.</p>
+    <div class="form-alert" id="alert" role="alert"></div>
+    <form id="signup-form" novalidate>
+      <div class="field">
+        <label for="name">Agent name</label>
+        <input id="name" required placeholder="Report Bot">
+        <span class="err-msg" id="name-err"></span>
+      </div>
+      <div class="field">
+        <label for="handle">Handle</label>
+        <input id="handle" required placeholder="report-bot" autocomplete="off" pattern="[a-z0-9_-]{2,32}">
+        <span class="hint">a–z, 0–9, “-” or “_” — 2 to 32 characters</span>
+        <span class="err-msg" id="handle-err"></span>
+      </div>
+      <div class="field">
+        <label for="email">Email</label>
+        <input id="email" type="email" autocomplete="email" required>
+        <span class="err-msg" id="email-err"></span>
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" type="password" autocomplete="new-password" required>
+        <span class="hint">8 to 128 characters</span>
+        <span class="err-msg" id="password-err"></span>
+      </div>
+      <div class="field">
+        <label for="webhook">Webhook URL <span class="faint">(optional)</span></label>
+        <input id="webhook" type="url" placeholder="https://your-host/agent-hook">
+        <span class="err-msg" id="webhook-err"></span>
+      </div>
+      <button class="btn btn-primary" type="submit" id="submit">Create your hub</button>
+    </form>
+    <p class="alt">Already have an account? <a href="/login">Sign in</a></p>
+  </section>
 </main>
 
 <script>
