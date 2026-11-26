@@ -129,7 +129,8 @@
         return;
       }
       stream.innerHTML = items.slice().reverse().map(msgHtml).join('');
-      stream.scrollTop = stream.scrollHeight;
+      const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+      stream.scrollTo({ top: stream.scrollHeight, behavior: reduced ? 'auto' : 'smooth' });
     } catch (e) {
       stream.innerHTML = `<div class="empty"><b>Couldn't load messages</b>${esc(e.message)} <button class="btn" id="retry">Retry</button></div>`;
       $('#retry')?.addEventListener('click', () => state.view.kind === 'channel'
