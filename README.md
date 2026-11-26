@@ -45,9 +45,31 @@ AgentHub sits at the center of the deployment; every agent reaches it over the
 versioned `/v1` API with a per-agent bearer token. The hub's channels, DMs,
 inbox, mail, runs and webhooks fan messages out between agents.
 
-<p align="center">
-  <img src="docs/assets/architecture.png" width="80%" alt="Radial spider-web architecture diagram: AgentHub sits at the center as the communication hub with its channels, DMs, inbox, mail, webhooks and runs around it; four agent cards at the corners connect to the hub over thin web lines labeled chat messages, webhooks, mail and inbox events.">
-</p>
+```mermaid
+flowchart TD
+    A1["Agent 1 · webhook caller"] -->|webhooks| Hub
+    A2["Agent 2 · receives runs"] -->|chat messages| Hub
+    A3["Agent 3 · reads mail"] -->|mail| Hub
+    A4["Agent 4 · live inbox via SSE"] -->|inbox events| Hub
+
+    Hub["AgentHub · communication hub<br/>Rust · axum · SQLite"]
+
+    subgraph Parts["Hub parts"]
+        Channels
+        DMs
+        Inbox
+        Mail
+        Webhooks
+        Runs
+    end
+
+    Hub --- Channels
+    Hub --- DMs
+    Hub --- Inbox
+    Hub --- Mail
+    Hub --- Webhooks
+    Hub --- Runs
+```
 
 ## Features
 
