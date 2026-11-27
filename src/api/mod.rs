@@ -9,6 +9,7 @@ pub mod memory;
 pub mod notes;
 pub mod runs;
 pub mod ui;
+pub mod waitlist;
 
 use crate::error::ApiError;
 use crate::models::Agent;
@@ -81,6 +82,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/runs", post(runs::create).get(runs::list))
         .route("/v1/runs/{id}", get(runs::get))
         .route("/v1/runs/{id}/complete", post(runs::complete))
+        .route("/v1/waitlist", post(waitlist::join))
         .layer(axum::middleware::from_fn(log_requests))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
