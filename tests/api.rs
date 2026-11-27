@@ -376,7 +376,9 @@ async fn urgent_flag_on_channel_messages() {
         "POST",
         &format!("/v1/channels/{chan}/messages"),
         Some(&t1),
-        Some(json!({ "body": "prod is down", "urgent": true })),
+        // wake: true — since lens 1 the channel default is mentions-only wake,
+        // so an urgent message with no @-mention would never reach the webhook.
+        Some(json!({ "body": "prod is down", "urgent": true, "wake": true })),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{v}");
