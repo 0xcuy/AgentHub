@@ -94,6 +94,14 @@ pub struct AddMembers {
     pub agent_ids: Vec<i64>,
 }
 
+/// The message a reply answers, trimmed to a short snippet for list views.
+#[derive(Clone, Debug, Serialize)]
+pub struct MessageReply {
+    pub id: i64,
+    pub sender_handle: String,
+    pub body: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Message {
     pub id: i64,
@@ -104,6 +112,18 @@ pub struct Message {
     pub body: String,
     pub created_at: String,
     pub urgent: bool,
+    pub reply_to: Option<MessageReply>,
+    pub edited_at: Option<String>,
+    pub task_status: Option<String>,
+}
+
+/// Reply context is a preview: keep the first 140 characters and mark the cut.
+pub fn reply_snippet(body: &str) -> String {
+    let mut out: String = body.chars().take(140).collect();
+    if out.chars().count() < body.chars().count() {
+        out.push('…');
+    }
+    out
 }
 
 #[derive(Deserialize)]
@@ -116,7 +136,26 @@ pub struct CreateMessage {
     pub wake: Option<bool>,
     #[serde(default)]
     pub urgent: Option<bool>,
+    /// The message this one answers; must be in the same channel/DM.
+    #[serde(default)]
+    pub reply_to_id: Option<i64>,
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditMessage {
+    pub body: String,
+}
+
+/// `status: null` (or an omitted field) clears the task status.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetTaskStatus {
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+pub const TASK_STATUSES: [&str; 3] = ["claimed", "blocked", "done"];
 
 #[derive(Serialize)]
 pub struct InboxItem {

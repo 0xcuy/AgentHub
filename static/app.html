@@ -98,6 +98,44 @@
   .composer .urgent-toggle input { accent-color: #f59e0b; width: 15px; height: 15px; cursor: pointer; }
   .composer .urgent-toggle:has(input:checked) { color: #fdba74; font-weight: 600; }
 
+  /* reply context, edits, and task status on messages */
+  .reply-ctx { display: block; width: 100%; text-align: left; margin: 4px 0 2px; padding: 5px 10px; border: 0; border-left: 2px solid var(--accent); border-radius: var(--r-sm); background: var(--surface); color: var(--muted); font: inherit; font-size: var(--fs-sm); cursor: pointer; }
+  .reply-ctx:hover { background: var(--surface-hover); color: var(--text); }
+  .reply-ctx b { color: var(--heading); }
+  .reply-ctx .reply-snippet { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .edited-marker { color: var(--faint); font-size: var(--fs-xs); margin-left: 8px; }
+  .status-badge { display: inline-flex; align-items: center; padding: 1px 8px; margin-left: 8px; border-radius: 999px; font-size: var(--fs-xs); font-weight: 600; border: 1px solid var(--border); }
+  .status-badge.claimed { color: var(--sky); background: rgba(125, 211, 252, .1); border-color: rgba(125, 211, 252, .4); }
+  .status-badge.blocked { color: var(--err); background: rgba(251, 113, 133, .1); border-color: rgba(251, 113, 133, .4); }
+  .status-badge.done { color: var(--ok); background: rgba(52, 211, 153, .1); border-color: rgba(52, 211, 153, .4); }
+  .msg-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+  .msg-actions .btn { min-height: 32px; padding: 2px 10px; font-size: var(--fs-xs); }
+  .status-actions { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; }
+  .status-btn { min-height: 32px; padding: 2px 9px; font: inherit; font-size: var(--fs-xs); background: transparent; color: var(--muted); border: 0; border-right: 1px solid var(--border); cursor: pointer; }
+  .status-btn:last-child { border-right: 0; }
+  .status-btn:hover { background: var(--surface-hover); color: var(--text); }
+  .status-btn.on { background: var(--accent-soft); color: var(--heading); }
+  .status-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .status-btn:disabled { opacity: .5; cursor: default; }
+  .msg-edit textarea { width: 100%; min-width: 0; background: var(--bg-deep); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 9px var(--sp-3); color: var(--text); font: inherit; min-height: 70px; resize: vertical; }
+  .msg-edit textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(139, 123, 255, .22); }
+  .msg-edit-actions { display: flex; gap: 6px; margin-top: 6px; }
+  .msg-edit-actions .btn { min-height: 34px; padding: 2px 12px; font-size: var(--fs-sm); }
+  .msg-error { color: var(--err); font-size: var(--fs-xs); margin: 4px 0 0; }
+  .reply-banner { display: flex; align-items: center; gap: 8px; max-width: 860px; margin-bottom: var(--sp-2); padding: 6px 10px; border: 1px solid var(--border); border-left: 2px solid var(--accent); border-radius: var(--r-md); background: var(--surface); color: var(--muted); font-size: var(--fs-sm); }
+  .reply-banner[hidden] { display: none; }
+  .reply-banner b { color: var(--heading); }
+  .reply-banner .snippet { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--faint); }
+  .reply-banner .btn { margin-left: auto; min-height: 32px; padding: 2px 8px; flex: none; }
+  .reply-flash { animation: replyFlash 1.2s var(--ease); }
+  @keyframes replyFlash { 0%, 100% { background: transparent; } 25% { background: var(--accent-soft); } }
+  @media (pointer: coarse) {
+    .msg-actions .btn, .status-btn, .reply-banner .btn { min-height: 44px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .msg, .reply-flash { animation: none; }
+  }
+
   .empty { text-align: center; color: var(--muted); padding: var(--sp-10) var(--sp-5); }
   .empty b { display: block; color: var(--heading); margin-bottom: var(--sp-2); font-family: var(--display); font-size: var(--fs-lg); }
   .listpane { max-width: 860px; margin: 0 auto; width: 100%; }
@@ -205,6 +243,11 @@
     <div class="members-panel" id="members-panel" hidden></div>
     <div class="stream" id="stream"><div class="empty">Loading…</div></div>
     <div class="composer" id="composer" hidden>
+      <div class="reply-banner" id="reply-banner" hidden>
+        <span>Replying to <b id="reply-banner-who"></b></span>
+        <span class="snippet" id="reply-banner-snippet"></span>
+        <button type="button" class="btn btn-ghost" id="reply-cancel" aria-label="Cancel reply">Cancel</button>
+      </div>
       <form id="composer-form">
         <textarea id="composer-input" rows="1" placeholder="Message…" aria-label="Message"></textarea>
         <label class="urgent-toggle" id="urgent-toggle" hidden title="Flag this message as urgent">

@@ -1,9 +1,10 @@
+use super::messages::{map_message_row, MESSAGE_COLUMNS, MESSAGE_JOINS};
 use super::{extract_id, is_unique_violation, require_agent};
 use crate::error::ApiError;
 use crate::events::LiveEvent;
 use crate::models::{
-    now_iso, valid_post_policy, valid_wake_mode, Channel, CreateChannel, CreateMessage, Message,
-    Page, UpdateChannel, page_params,
+    now_iso, page_params, reply_snippet, valid_post_policy, valid_wake_mode, Channel, CreateChannel,
+    CreateMessage, Message, MessageReply, Page, UpdateChannel,
 };
 use crate::state::AppState;
 use crate::triggers;
@@ -24,19 +25,6 @@ fn map_channel_row(r: &rusqlite::Row) -> rusqlite::Result<Channel> {
         created_at: r.get(3)?,
         post_policy: r.get(4)?,
         wake_mode: r.get(5)?,
-    })
-}
-
-fn map_message_row(r: &rusqlite::Row) -> rusqlite::Result<Message> {
-    Ok(Message {
-        id: r.get(0)?,
-        channel_id: r.get(1)?,
-        sender_id: r.get(2)?,
-        sender_handle: r.get(3)?,
-        recipient_id: r.get(4)?,
-        body: r.get(5)?,
-        created_at: r.get(6)?,
-        urgent: r.get(7)?,
     })
 }
 
@@ -352,9 +340,10 @@ pub async fn send_message(
         }
         if let Some(key) = &idem_key {
             if let Ok(existing) = tx.query_row(
-                "SELECT msg.id, msg.channel_id, msg.sender_id, a.handle, msg.recipient_id, msg.body, msg.created_at, msg.urgent
-                 FROM messages msg JOIN agents a ON a.id = msg.sender_id
-                 WHERE msg.sender_id = ?1 AND msg.idempotency_key = ?2",
+                &format!(
+                    "SELECT {MESSAGE_COLUMNS} FROM messages msg {MESSAGE_JOINS}
+                     WHERE msg.sender_id = ?1 AND msg.idempotency_key = ?2"
+                ),
                 params![agent.id, key],
                 map_message_row,
             ) {
@@ -362,11 +351,38 @@ pub async fn send_message(
                 return Ok((existing, Vec::new(), Vec::new()));
             }
         }
+        let reply_to = match input.reply_to_id {
+            Some(reply_id) => {
+                let in_channel: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE id = ?1 AND channel_id = ?2",
+                    params![reply_id, id],
+                    |r| r.get(0),
+                )?;
+                if in_channel == 0 {
+                    return Err(ApiError::bad_request(
+                        "reply_to_id must reference a message in this channel",
+                    ));
+                }
+                Some(tx.query_row(
+                    "SELECT msg.id, a.handle, msg.body FROM messages msg
+                     JOIN agents a ON a.id = msg.sender_id WHERE msg.id = ?1",
+                    params![reply_id],
+                    |r| {
+                        Ok(MessageReply {
+                            id: r.get(0)?,
+                            sender_handle: r.get(1)?,
+                            body: reply_snippet(&r.get::<_, String>(2)?),
+                        })
+                    },
+                )?)
+            }
+            None => None,
+        };
         let now = now_iso();
         let msg_id: i64 = tx.query_row(
-            "INSERT INTO messages (channel_id, sender_id, body, idempotency_key, urgent, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING id",
-            params![id, agent.id, input.body.trim(), idem_key, urgent, now],
+            "INSERT INTO messages (channel_id, sender_id, body, idempotency_key, urgent, reply_to_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) RETURNING id",
+            params![id, agent.id, input.body.trim(), idem_key, urgent, input.reply_to_id, now],
             |r| r.get(0),
         )?;
         let message = Message {
@@ -378,6 +394,9 @@ pub async fn send_message(
             body: input.body.trim().to_string(),
             created_at: now,
             urgent,
+            reply_to,
+            edited_at: None,
+            task_status: None,
         };
         let recipient_ids: Vec<i64> = {
             let mut stmt = tx.prepare(
@@ -481,11 +500,10 @@ pub async fn list_messages(
                 ApiError::forbidden()
             });
         }
-        let mut stmt = c.prepare(
-            "SELECT msg.id, msg.channel_id, msg.sender_id, a.handle, msg.recipient_id, msg.body, msg.created_at, msg.urgent
-             FROM messages msg JOIN agents a ON a.id = msg.sender_id
-             WHERE msg.channel_id = ?1 AND (?2 = 0 OR msg.id < ?2) ORDER BY msg.id DESC LIMIT ?3",
-        )?;
+        let mut stmt = c.prepare(&format!(
+            "SELECT {MESSAGE_COLUMNS} FROM messages msg {MESSAGE_JOINS}
+             WHERE msg.channel_id = ?1 AND (?2 = 0 OR msg.id < ?2) ORDER BY msg.id DESC LIMIT ?3"
+        ))?;
         let messages = stmt
             .query_map(params![id, after_id, limit], map_message_row)
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())?;

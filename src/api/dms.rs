@@ -1,6 +1,9 @@
+use super::messages::{map_message_row, MESSAGE_COLUMNS, MESSAGE_JOINS};
 use super::{extract_id, require_agent};
 use crate::error::ApiError;
-use crate::models::{now_iso, CreateMessage, Message, Page, page_params};
+use crate::models::{
+    now_iso, page_params, reply_snippet, CreateMessage, Message, MessageReply, Page,
+};
 use crate::state::AppState;
 use crate::triggers;
 use axum::extract::{Path, Query, State};
@@ -8,19 +11,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use rusqlite::params;
-
-fn map_message_row(r: &rusqlite::Row) -> rusqlite::Result<Message> {
-    Ok(Message {
-        id: r.get(0)?,
-        channel_id: r.get(1)?,
-        sender_id: r.get(2)?,
-        sender_handle: r.get(3)?,
-        recipient_id: r.get(4)?,
-        body: r.get(5)?,
-        created_at: r.get(6)?,
-        urgent: r.get(7)?,
-    })
-}
 
 pub async fn list_partners(
     State(state): State<AppState>,
@@ -63,7 +53,7 @@ pub async fn send(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    let (message, run_ids, receipt_id) = state.db.with(|c| {
+    let (message, run_ids, receipt_id) = state.db.try_with(|c| {
         let tx = c.transaction()?;
         let recipient_exists: i64 = tx.query_row(
             // Same workspace only: a DM into another workspace must fail with
@@ -73,13 +63,14 @@ pub async fn send(
             |r| r.get(0),
         )?;
         if recipient_exists == 0 {
-            return Err(rusqlite::Error::QueryReturnedNoRows);
+            return Err(ApiError::not_found("recipient not found"));
         }
         if let Some(key) = &idem_key {
             if let Ok(existing) = tx.query_row(
-                "SELECT msg.id, msg.channel_id, msg.sender_id, a.handle, msg.recipient_id, msg.body, msg.created_at, msg.urgent
-                 FROM messages msg JOIN agents a ON a.id = msg.sender_id
-                 WHERE msg.sender_id = ?1 AND msg.idempotency_key = ?2",
+                &format!(
+                    "SELECT {MESSAGE_COLUMNS} FROM messages msg {MESSAGE_JOINS}
+                     WHERE msg.sender_id = ?1 AND msg.idempotency_key = ?2"
+                ),
                 params![agent.id, key],
                 map_message_row,
             ) {
@@ -87,11 +78,40 @@ pub async fn send(
                 return Ok((existing, Vec::new(), None));
             }
         }
+        let reply_to = match input.reply_to_id {
+            Some(reply_id) => {
+                let in_conversation: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE id = ?1 AND channel_id IS NULL
+                     AND ((sender_id = ?2 AND recipient_id = ?3)
+                       OR (sender_id = ?3 AND recipient_id = ?2))",
+                    params![reply_id, agent.id, recipient_id],
+                    |r| r.get(0),
+                )?;
+                if in_conversation == 0 {
+                    return Err(ApiError::bad_request(
+                        "reply_to_id must reference a message in this conversation",
+                    ));
+                }
+                Some(tx.query_row(
+                    "SELECT msg.id, a.handle, msg.body FROM messages msg
+                     JOIN agents a ON a.id = msg.sender_id WHERE msg.id = ?1",
+                    params![reply_id],
+                    |r| {
+                        Ok(MessageReply {
+                            id: r.get(0)?,
+                            sender_handle: r.get(1)?,
+                            body: reply_snippet(&r.get::<_, String>(2)?),
+                        })
+                    },
+                )?)
+            }
+            None => None,
+        };
         let now = now_iso();
         let msg_id: i64 = tx.query_row(
-            "INSERT INTO messages (sender_id, recipient_id, body, idempotency_key, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
-            params![agent.id, recipient_id, input.body.trim(), idem_key, now],
+            "INSERT INTO messages (sender_id, recipient_id, body, idempotency_key, reply_to_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING id",
+            params![agent.id, recipient_id, input.body.trim(), idem_key, input.reply_to_id, now],
             |r| r.get(0),
         )?;
         let receipt_id: i64 = tx.query_row(
@@ -111,13 +131,13 @@ pub async fn send(
                 body: input.body.trim().to_string(),
                 created_at: now,
                 urgent: false,
+                reply_to,
+                edited_at: None,
+                task_status: None,
             },
             run_ids,
             Some(receipt_id),
         ))
-    }).map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => ApiError::not_found("recipient not found"),
-        other => other.into(),
     })?;
 
     if let Some(receipt_id) = receipt_id {
@@ -154,15 +174,14 @@ pub async fn list(
         return Err(ApiError::not_found("partner not found"));
     }
     let messages = state.db.try_with(|c| {
-        let mut stmt = c.prepare(
-            "SELECT msg.id, msg.channel_id, msg.sender_id, a.handle, msg.recipient_id, msg.body, msg.created_at, msg.urgent
-             FROM messages msg JOIN agents a ON a.id = msg.sender_id
+        let mut stmt = c.prepare(&format!(
+            "SELECT {MESSAGE_COLUMNS} FROM messages msg {MESSAGE_JOINS}
              WHERE msg.channel_id IS NULL
                AND ((msg.sender_id = ?1 AND msg.recipient_id = ?2)
                  OR (msg.sender_id = ?2 AND msg.recipient_id = ?1))
                AND (?3 = 0 OR msg.id < ?3)
-             ORDER BY msg.id DESC LIMIT ?4",
-        )?;
+             ORDER BY msg.id DESC LIMIT ?4"
+        ))?;
         let messages = stmt
             .query_map(params![agent.id, other_id, after_id, limit], map_message_row)
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())?;

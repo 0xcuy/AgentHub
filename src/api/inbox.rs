@@ -36,16 +36,7 @@ fn map_inbox_row(r: &rusqlite::Row) -> rusqlite::Result<InboxItem> {
     Ok(InboxItem {
         receipt_id: r.get(0)?,
         read_at: r.get(1)?,
-        message: crate::models::Message {
-            id: r.get(2)?,
-            channel_id: r.get(3)?,
-            sender_id: r.get(4)?,
-            sender_handle: r.get(5)?,
-            recipient_id: r.get(6)?,
-            body: r.get(7)?,
-            created_at: r.get(8)?,
-            urgent: r.get(9)?,
-        },
+        message: super::messages::map_message_at(r, 2)?,
     })
 }
 
@@ -68,15 +59,16 @@ pub async fn list(
     let cursor = q.since.unwrap_or(after_id);
     let items = state.db.with(|c| {
         let mut stmt = c.prepare(&format!(
-            "SELECT r.id, r.read_at, msg.id, msg.channel_id, msg.sender_id, a.handle,
-                    msg.recipient_id, msg.body, msg.created_at, msg.urgent
+            "SELECT r.id, r.read_at, {message_columns}
              FROM receipts r
              JOIN messages msg ON msg.id = r.message_id
-             JOIN agents a ON a.id = msg.sender_id
+             {message_joins}
              WHERE r.agent_id = ?1 AND (?2 = 0 OR r.id {} ?2){unread_clause}
              ORDER BY r.id {} LIMIT ?3",
             if forward { ">" } else { "<" },
-            if forward { "ASC" } else { "DESC" }
+            if forward { "ASC" } else { "DESC" },
+            message_columns = super::messages::MESSAGE_COLUMNS,
+            message_joins = super::messages::MESSAGE_JOINS,
         ))?;
         stmt.query_map(params![agent.id, cursor, limit], map_inbox_row)
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
@@ -144,13 +136,14 @@ pub async fn stream(
     };
     let replay = state.db.with(|c| {
         let mut stmt = c.prepare(&format!(
-            "SELECT r.id, r.read_at, msg.id, msg.channel_id, msg.sender_id, a.handle,
-                    msg.recipient_id, msg.body, msg.created_at, msg.urgent
+            "SELECT r.id, r.read_at, {message_columns}
              FROM receipts r
              JOIN messages msg ON msg.id = r.message_id
-             JOIN agents a ON a.id = msg.sender_id
+             {message_joins}
              WHERE {replay_where}
-             ORDER BY r.id ASC"
+             ORDER BY r.id ASC",
+            message_columns = super::messages::MESSAGE_COLUMNS,
+            message_joins = super::messages::MESSAGE_JOINS,
         ))?;
         let mapped = match q.since {
             Some(cursor) => stmt.query_map(params![agent.id, cursor], map_inbox_row)?,

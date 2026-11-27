@@ -3187,3 +3187,389 @@ async fn dm_read_receipts_and_reactions_visible_to_sender() {
     let (_, v) = call(&router, "GET", &format!("/v1/dms/{a1}/messages"), Some(&t2), None).await;
     assert_eq!(v["messages"][0]["reactions"][0]["mine"], true);
 }
+
+// --- Replies, edits, and task status on messages ---
+
+#[tokio::test]
+async fn message_reply_and_edit_flow() {
+    let router = test_app("msg-reply-edit");
+    let (a1, t1) = register(&router, "alpha", None).await;
+    let (a2, t2) = add_agent(&router, &t1, "beta", None).await;
+    let (a3, t3) = add_agent(&router, &t1, "gamma", None).await;
+    let (status, v) = call(
+        &router,
+        "POST",
+        "/v1/channels",
+        Some(&t1),
+        Some(json!({ "name": "eng", "member_ids": [a2, a3] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "channel create failed: {v}");
+    let chan = v["channel"]["id"].as_i64().unwrap();
+
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{chan}/messages"),
+        Some(&t1),
+        Some(json!({ "body": "parent body" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let parent = v["message"]["id"].as_i64().unwrap();
+    assert!(
+        v["message"]["reply_to"].is_null(),
+        "a plain message has no reply context"
+    );
+
+    // beta replies in the same channel: the response carries the context.
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{chan}/messages"),
+        Some(&t2),
+        Some(json!({ "body": "a reply", "reply_to_id": parent })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "reply send failed: {v}");
+    let reply_id = v["message"]["id"].as_i64().unwrap();
+    assert_eq!(v["message"]["reply_to"]["id"].as_i64(), Some(parent));
+    assert_eq!(v["message"]["reply_to"]["sender_handle"], "alpha");
+    assert_eq!(v["message"]["reply_to"]["body"], "parent body");
+    assert!(v["message"]["edited_at"].is_null());
+    assert!(v["message"]["task_status"].is_null());
+
+    // list responses include the replied-to message too.
+    let (status, v) = call(
+        &router,
+        "GET",
+        &format!("/v1/channels/{chan}/messages"),
+        Some(&t3),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let listed = v["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"].as_i64() == Some(reply_id))
+        .expect("reply must be listed");
+    assert_eq!(listed["reply_to"]["id"].as_i64(), Some(parent));
+    assert_eq!(listed["reply_to"]["sender_handle"], "alpha");
+    assert_eq!(listed["reply_to"]["body"], "parent body");
+
+    // A reply must target an existing message in the same channel.
+    let (status, _) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{chan}/messages"),
+        Some(&t1),
+        Some(json!({ "body": "orphan", "reply_to_id": 999_999 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, v) = call(
+        &router,
+        "POST",
+        "/v1/channels",
+        Some(&t1),
+        Some(json!({ "name": "other", "member_ids": [a1] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let other_chan = v["channel"]["id"].as_i64().unwrap();
+    let (_, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{other_chan}/messages"),
+        Some(&t1),
+        Some(json!({ "body": "elsewhere" })),
+    )
+    .await;
+    let other_msg = v["message"]["id"].as_i64().unwrap();
+    let (status, _) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{chan}/messages"),
+        Some(&t1),
+        Some(json!({ "body": "wrong channel", "reply_to_id": other_msg })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "reply across channels must be rejected"
+    );
+
+    // DM replies: a channel message is not a valid target, a DM message is.
+    let (status, _) = call(
+        &router,
+        "POST",
+        &format!("/v1/dms/{a1}/messages"),
+        Some(&t2),
+        Some(json!({ "body": "dm", "reply_to_id": parent })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "reply across channel/DM must be rejected"
+    );
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/dms/{a1}/messages"),
+        Some(&t2),
+        Some(json!({ "body": "hi alpha" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let dm_parent = v["message"]["id"].as_i64().unwrap();
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/dms/{a2}/messages"),
+        Some(&t1),
+        Some(json!({ "body": "hi beta", "reply_to_id": dm_parent })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "DM reply send failed: {v}");
+    assert_eq!(v["message"]["reply_to"]["id"].as_i64(), Some(dm_parent));
+    assert_eq!(v["message"]["reply_to"]["sender_handle"], "beta");
+    let (status, v) = call(
+        &router,
+        "GET",
+        &format!("/v1/dms/{a1}/messages"),
+        Some(&t2),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        v["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["reply_to"]["id"].as_i64() == Some(dm_parent)),
+        "DM list must carry reply context"
+    );
+
+    // Only the sender may edit; edits set edited_at.
+    let (status, v) = call(
+        &router,
+        "PATCH",
+        &format!("/v1/messages/{reply_id}"),
+        Some(&t2),
+        Some(json!({ "body": "a reply (edited)" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "sender edit failed: {v}");
+    assert_eq!(v["message"]["body"], "a reply (edited)");
+    assert!(
+        v["message"]["edited_at"].is_string(),
+        "editing must record edited_at"
+    );
+    assert_eq!(v["message"]["reply_to"]["id"].as_i64(), Some(parent));
+
+    let (status, _) = call(
+        &router,
+        "PATCH",
+        &format!("/v1/messages/{reply_id}"),
+        Some(&t1),
+        Some(json!({ "body": "hijacked" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "non-senders must not edit");
+
+    let (status, _) = call(
+        &router,
+        "PATCH",
+        &format!("/v1/messages/{parent}"),
+        Some(&t2),
+        Some(json!({ "body": "  " })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an empty edit must be rejected"
+    );
+
+    let (status, v) = call(
+        &router,
+        "GET",
+        &format!("/v1/channels/{chan}/messages"),
+        Some(&t3),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let listed = v["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"].as_i64() == Some(reply_id))
+        .unwrap();
+    assert_eq!(listed["body"], "a reply (edited)");
+    assert!(listed["edited_at"].is_string());
+}
+
+#[tokio::test]
+async fn message_task_status_transitions() {
+    let router = test_app("msg-status");
+    let (a1, t1) = register(&router, "alpha", None).await;
+    let (a2, t2) = add_agent(&router, &t1, "beta", None).await;
+    let (a3, t3) = add_agent(&router, &t1, "gamma", None).await;
+    let (status, v) = call(
+        &router,
+        "POST",
+        "/v1/channels",
+        Some(&t1),
+        Some(json!({ "name": "ops", "member_ids": [a2, a3] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "channel create failed: {v}");
+    let chan = v["channel"]["id"].as_i64().unwrap();
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{chan}/messages"),
+        Some(&t2),
+        Some(json!({ "body": "ship the release" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let msg = v["message"]["id"].as_i64().unwrap();
+
+    // claimed -> blocked -> done, each returning the new status.
+    for expected in ["claimed", "blocked", "done"] {
+        let (status, v) = call(
+            &router,
+            "POST",
+            &format!("/v1/messages/{msg}/status"),
+            Some(&t2),
+            Some(json!({ "status": expected })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "status {expected} failed: {v}");
+        assert_eq!(v["message"]["task_status"], expected);
+    }
+    let (status, v) = call(
+        &router,
+        "GET",
+        &format!("/v1/channels/{chan}/messages"),
+        Some(&t2),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let listed = v["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"].as_i64() == Some(msg))
+        .unwrap();
+    assert_eq!(
+        listed["task_status"], "done",
+        "list responses carry the status"
+    );
+
+    // null clears the task status.
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/messages/{msg}/status"),
+        Some(&t2),
+        Some(json!({ "status": null })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        v["message"]["task_status"].is_null(),
+        "null must clear the status"
+    );
+
+    let (status, _) = call(
+        &router,
+        "POST",
+        &format!("/v1/messages/{msg}/status"),
+        Some(&t2),
+        Some(json!({ "status": "shipping" })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "unknown status values are rejected"
+    );
+
+    // A member who is neither the sender nor a channel admin may not set it.
+    let (status, _) = call(
+        &router,
+        "POST",
+        &format!("/v1/messages/{msg}/status"),
+        Some(&t3),
+        Some(json!({ "status": "claimed" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // The channel admin may set it on someone else's message.
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/messages/{msg}/status"),
+        Some(&t1),
+        Some(json!({ "status": "blocked" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "channel admin status failed: {v}");
+    assert_eq!(v["message"]["task_status"], "blocked");
+
+    let (status, _) = call(
+        &router,
+        "POST",
+        "/v1/messages/999999/status",
+        Some(&t2),
+        Some(json!({ "status": "done" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // In a DM only the sender can set the status (there is no channel admin).
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/dms/{a1}/messages"),
+        Some(&t2),
+        Some(json!({ "body": "dm task" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let dm_msg = v["message"]["id"].as_i64().unwrap();
+    let (status, _) = call(
+        &router,
+        "POST",
+        &format!("/v1/messages/{dm_msg}/status"),
+        Some(&t1),
+        Some(json!({ "status": "claimed" })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a DM recipient is not the sender"
+    );
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/messages/{dm_msg}/status"),
+        Some(&t2),
+        Some(json!({ "status": "claimed" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["message"]["task_status"], "claimed");
+}
