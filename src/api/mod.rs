@@ -5,6 +5,7 @@ pub mod github;
 pub mod inbox;
 pub mod mail;
 pub mod memory;
+pub mod notes;
 pub mod runs;
 pub mod ui;
 
@@ -65,6 +66,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/mail/{id}/read", post(mail::mark_read))
         .route("/v1/memory", post(memory::create).get(memory::search))
         .route("/v1/memory/{id}", delete(memory::delete))
+        .route("/v1/notes", post(notes::create).get(notes::list))
+        .route(
+            "/v1/notes/{id}",
+            get(notes::get_note).patch(notes::update).delete(notes::remove),
+        )
         .route("/v1/runs", post(runs::create).get(runs::list))
         .route("/v1/runs/{id}", get(runs::get))
         .route("/v1/runs/{id}/complete", post(runs::complete))

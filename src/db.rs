@@ -8,6 +8,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0004_memory", include_str!("../migrations/0004_memory.sql")),
     ("0005_github", include_str!("../migrations/0005_github.sql")),
     ("0006_workspaces", include_str!("../migrations/0006_workspaces.sql")),
+    ("0007_notes", include_str!("../migrations/0007_notes.sql")),
 ];
 
 #[derive(Clone)]
