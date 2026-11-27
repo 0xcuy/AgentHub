@@ -222,7 +222,10 @@
     try {
       const v = await api('/v1/agents?limit=100');
       state.agents = v.agents ?? [];
-      stream.innerHTML = state.agents.map((a) => `
+      paneSub.textContent = `${state.agents.length} registered`;
+      stream.innerHTML = `<div style="display:flex;justify-content:flex-end;margin-bottom:var(--sp-3)">
+          <button class="btn btn-primary" id="agents-add">+ Add agent</button></div>` +
+        state.agents.map((a) => `
         <div class="row">
           ${avatarEl(a.handle)}
           <div class="grow"><b>${esc(a.name)}</b> <span class="muted mono">@${esc(a.handle)}</span>
@@ -230,45 +233,56 @@
           ${a.id === state.me.agent.id
             ? '<span class="badge ok"><span class="dot"></span>you</span>'
             : `<button class="btn" data-dm="${a.id}">Message</button>`}
-        </div>`).join('') + `
-        <div style="margin-top:var(--sp-6)">
-          <h3 style="margin-bottom:var(--sp-3)">Register a new agent</h3>
-          <form id="reg-agent" style="display:grid;gap:var(--sp-3);max-width:420px">
-            <div class="field"><label for="ra-name">Name</label><input id="ra-name" required></div>
-            <div class="field"><label for="ra-handle">Handle</label><input id="ra-handle" required pattern="[a-z0-9_-]{2,32}"></div>
-            <div class="field"><label for="ra-webhook">Webhook URL <span class="faint">(optional)</span></label><input id="ra-webhook" type="url"></div>
-            <div><button class="btn btn-primary" type="submit">Register agent</button></div>
-            <p class="faint" id="ra-msg" style="min-height:1.2em"></p>
-          </form>
-        </div>`;
+        </div>`).join('');
       stream.querySelectorAll('[data-dm]').forEach((b) =>
         b.addEventListener('click', () => showDm(+b.dataset.dm)));
-      $('#reg-agent')?.addEventListener('submit', registerAgent);
+      $('#agents-add')?.addEventListener('click', openAddAgentDialog);
     } catch (e) {
       stream.innerHTML = `<div class="empty"><b>Couldn't load directory</b>${esc(e.message)}</div>`;
     }
   }
 
+  function openAddAgentDialog() {
+    const dlg = $('#add-agent-dialog');
+    $('#aa-form').hidden = false;
+    $('#aa-token-panel').hidden = true;
+    $('#aa-msg').textContent = '';
+    dlg.showModal();
+    $('#aa-name').focus();
+  }
+
   async function registerAgent(e) {
     e.preventDefault();
-    const msg = $('#ra-msg');
+    const msg = $('#aa-msg');
+    const create = $('#aa-create');
     msg.textContent = '';
+    create.disabled = true;
     try {
       const v = await api('/v1/agents', {
         method: 'POST',
         body: JSON.stringify({
-          name: $('#ra-name').value.trim(),
-          handle: $('#ra-handle').value.trim(),
-          webhook_url: $('#ra-webhook').value.trim() || null,
+          name: $('#aa-name').value.trim(),
+          handle: $('#aa-handle').value.trim(),
+          webhook_url: $('#aa-webhook').value.trim() || null,
         }),
       });
-      const t = v.agent?.token;
-      msg.innerHTML = t
-        ? `Registered <b>@${esc(v.agent.handle)}</b> — token (shown once): <span class="token-box">${esc(t)}</span>`
-        : `Registered @${esc(v.agent.handle)}.`;
-      await loadDirectory();
+      // The bearer token is a TOP-LEVEL field of the POST /v1/agents response.
+      const t = v.token;
+      if (!t) {
+        msg.textContent = `Registered @${v.agent?.handle ?? ''}, but the server returned no token — it cannot be shown here.`;
+        return;
+      }
+      $('#aa-token-box').textContent = t;
+      $('#aa-copy').textContent = 'Copy';
+      $('#aa-form').reset();
+      $('#aa-form').hidden = true;
+      $('#aa-token-panel').hidden = false;
+      // Re-render the directory (list + "N registered" count) behind the dialog.
+      showAgents();
     } catch (err) {
       msg.textContent = err.message;
+    } finally {
+      create.disabled = false;
     }
   }
 
@@ -659,6 +673,21 @@
     } catch (err) {
       alert(err.message);
     }
+  });
+
+  $('#add-agent').addEventListener('click', openAddAgentDialog);
+  $('#aa-form').addEventListener('submit', registerAgent);
+  $('#aa-cancel').addEventListener('click', () => $('#add-agent-dialog').close());
+  $('#aa-done').addEventListener('click', () => $('#add-agent-dialog').close());
+  $('#add-agent-dialog').addEventListener('close', () => {
+    $('#aa-form').reset();
+    $('#aa-form').hidden = false;
+    $('#aa-token-panel').hidden = true;
+    $('#aa-msg').textContent = '';
+    $('#aa-create').disabled = false;
+  });
+  $('#aa-copy').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText($('#aa-token-box').textContent); $('#aa-copy').textContent = 'Copied'; } catch {}
   });
 
   $('#token-btn').addEventListener('click', () => {
