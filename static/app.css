@@ -6,15 +6,26 @@
 @font-face { font-family:'Space Grotesk'; font-style:normal; font-weight:500 700; font-display:swap; src:url('/fonts/space-grotesk.woff2') format('woff2'); }
 
 :root {
-  /* canvas + panels (Aksara palette) */
-  --bg: #04060d;
-  --bg-raised: #070a16;
-  --bg-deep: #0a0f1f;
-  --surface: rgba(255, 255, 255, 0.04);
+  /* canvas + panels — deep-space dark theme rooted at #0B0B12 */
+  --bg: #0b0b12;
+  --bg-raised: #12131f;
+  --bg-deep: rgba(5, 6, 12, 0.55);
+  --surface: rgba(255, 255, 255, 0.045);
   --surface-hover: rgba(255, 255, 255, 0.09);
-  --surface-solid: #0d1226;
-  --border: rgba(255, 255, 255, 0.09);
-  --border-strong: rgba(255, 255, 255, 0.18);
+  --surface-solid: #14162a;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+
+  /* glassmorphism surfaces: light frost for panels resting on the ambient
+     canvas, dark smoke for strips floating over scrolling content, and a
+     raised frost for the topmost layer (dialogs, sheets). Pair with the
+     blur/saturate recipes in the .glass* primitives below. */
+  --glass: rgba(255, 255, 255, 0.05);
+  --glass-raised: rgba(255, 255, 255, 0.08);
+  --smoke: rgba(11, 11, 18, 0.55);
+  --smoke-strong: rgba(11, 11, 18, 0.72);
+  --glass-pop: rgba(22, 25, 42, 0.72);
+  --edge-light: rgba(255, 255, 255, 0.07);
 
   /* ink */
   --text: #e9ecf5;
@@ -63,15 +74,27 @@
   --r-lg: 12px;
   --r-xl: 16px;
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  /* layered soft shadows — panels sit low and close, pops float high */
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-2: 0 24px 70px -24px rgba(0, 0, 0, 0.85);
+  --shadow-panel: 0 10px 34px -14px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.25);
+  --shadow-pop: 0 32px 90px -20px rgba(0, 0, 0, 0.8), 0 8px 28px -8px rgba(0, 0, 0, 0.5);
   --glow: 0 0 50px rgba(139, 123, 255, 0.35);
 }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
 body {
-  background: var(--bg);
+  /* ambient canvas: near-black #0B0B12 washed with three slow-violet/mint
+     glows. The glows are what the frosted panels actually diffuse — without
+     them backdrop-filter blur has nothing to work with. Fixed attachment
+     keeps the wash viewport-stable while content scrolls behind glass. */
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(1080px 620px at 82% -12%, rgba(139, 123, 255, 0.13), transparent 62%),
+    radial-gradient(880px 600px at 2% 20%, rgba(94, 234, 212, 0.06), transparent 58%),
+    radial-gradient(980px 760px at 58% 112%, rgba(125, 211, 252, 0.06), transparent 60%);
+  background-attachment: fixed;
   color: var(--text);
   font-family: var(--font);
   font-size: var(--fs-md);
@@ -118,6 +141,60 @@ button, input, textarea, select { font: inherit; color: inherit; }
   color: transparent;
 }
 
+/* ---------- glassmorphism primitives ----------
+   Three elevation tiers, hooked in the markup where a surface should read
+   as frosted glass. Each tier pairs a translucent tint with backdrop blur
+   + saturation, a 1px hairline, an inset top edge-light (the thin bright
+   rim a real glass slab catches) and a soft layered shadow. Layout stays
+   in the pages; these classes only carry the material. */
+.glass {
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(18px) saturate(1.5);
+  backdrop-filter: blur(18px) saturate(1.5);
+  border: 1px solid var(--border);
+  box-shadow: inset 0 1px 0 var(--edge-light), var(--shadow-panel);
+}
+/* dark frost for strips floating over scrolling content — pane head,
+   composer, member panel. No border ring: the layout hairlines those
+   elements already draw stay in charge. */
+.glass-smoke {
+  background: var(--smoke);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  backdrop-filter: blur(20px) saturate(1.5);
+}
+/* light frost for the rail resting on the canvas edge (the sidebar): a
+   pale tint — not a dark one — so it reads as a separate glass layer
+   instead of blending into the dark stream beside it */
+.glass-side {
+  background: linear-gradient(rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.022));
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  backdrop-filter: blur(20px) saturate(1.5);
+  box-shadow: inset 0 1px 0 var(--edge-light);
+}
+.glass-smoke-strong {
+  background: var(--smoke-strong);
+  -webkit-backdrop-filter: blur(22px) saturate(1.5);
+  backdrop-filter: blur(22px) saturate(1.5);
+}
+/* elevated frost for the topmost layer — dialogs and the mobile sheet.
+   lighter tint + deeper blur + bigger shadow = visibly closer to the eye. */
+.glass-pop {
+  background: var(--glass-pop);
+  -webkit-backdrop-filter: blur(28px) saturate(1.6);
+  backdrop-filter: blur(28px) saturate(1.6);
+  border: 1px solid var(--border-strong);
+  box-shadow: inset 0 1px 0 var(--edge-light), var(--shadow-pop);
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  /* no frosted glass available: fall back to near-solid surfaces so text
+     contrast never depends on a blur that is not there */
+  .glass { background: rgba(18, 20, 34, 0.92); }
+  .glass-smoke { background: rgba(11, 11, 18, 0.94); }
+  .glass-side { background: rgba(21, 23, 38, 0.96); }
+  .glass-smoke-strong { background: rgba(11, 11, 18, 0.97); }
+  .glass-pop { background: rgba(22, 25, 42, 0.97); }
+}
+
 /* ---------- buttons (Aksara family) ---------- */
 .btn {
   display: inline-flex;
@@ -129,6 +206,7 @@ button, input, textarea, select { font: inherit; color: inherit; }
   border-radius: var(--r-lg);
   border: 1px solid var(--border-strong);
   background: rgba(255, 255, 255, 0.045);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
   color: var(--text);
   font-size: var(--fs-md);
   font-weight: 600;
@@ -160,12 +238,15 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .field { display: flex; flex-direction: column; gap: var(--sp-1); margin-bottom: var(--sp-4); }
 .field label { font-size: var(--fs-sm); color: var(--muted); font-weight: 500; }
 .field input, .field textarea, .field select {
+  /* sunken glass well: translucent so the panel's frost shows through,
+     inner shadow presses it below the surface for layered depth */
   background: var(--bg-deep);
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
   padding: 11px var(--sp-3);
   min-height: 42px;
   color: var(--text);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.35);
   transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease), background 0.2s var(--ease);
 }
 .field input::placeholder, .field textarea::placeholder { color: var(--faint); }
