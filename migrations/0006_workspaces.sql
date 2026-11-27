@@ -29,8 +29,14 @@ ALTER TABLE memories ADD COLUMN workspace_id INTEGER NOT NULL DEFAULT 1;
 -- channels: name uniqueness moves from global to per-workspace
 -- UNIQUE(workspace_id, name) so two workspaces may each have a #general.
 -- SQLite cannot drop a UNIQUE constraint with ALTER TABLE, so the table is
--- rebuilt, preserving every id.
+-- rebuilt, preserving every id. The rebuild is atomic (BEGIN ... COMMIT):
+-- Db::migrate runs this file with execute_batch, which does not wrap it in a
+-- transaction, and a crash between DROP TABLE and the RENAME would leave the
+-- database unmigratable. The PRAGMAs stay outside the transaction — a
+-- PRAGMA foreign_keys inside one is a no-op.
 PRAGMA foreign_keys = OFF;
+
+BEGIN;
 
 CREATE TABLE channels_new (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,5 +53,7 @@ SELECT id, 1, name, topic, post_policy, created_at FROM channels;
 
 DROP TABLE channels;
 ALTER TABLE channels_new RENAME TO channels;
+
+COMMIT;
 
 PRAGMA foreign_keys = ON;

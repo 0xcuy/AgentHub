@@ -35,12 +35,28 @@ pub async fn create(
     let agent = require_agent(&state, &headers)?;
     let run_id = state.db.try_with(|c| {
         let tx = c.transaction()?;
-        let exists: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM messages WHERE id = ?1",
-            [input.message_id],
+        // Visibility gate: a run may only reference a message the caller can
+        // already read — a channel message in a channel they are a member of
+        // (in their own workspace), or a DM they sent or received. Anything
+        // else answers 404, so another workspace's message ids cannot be
+        // probed or delivered to this caller's webhook.
+        let visible: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM messages m
+             WHERE m.id = ?1
+               AND (
+                 (m.channel_id IS NOT NULL AND EXISTS (
+                    SELECT 1 FROM channel_members cm
+                    JOIN channels ch ON ch.id = cm.channel_id
+                    WHERE cm.channel_id = m.channel_id
+                      AND cm.agent_id = ?2
+                      AND ch.workspace_id = ?3))
+                 OR (m.channel_id IS NULL AND m.sender_id = ?2)
+                 OR (m.channel_id IS NULL AND m.recipient_id = ?2)
+               )",
+            params![input.message_id, agent.id, agent.workspace_id],
             |r| r.get(0),
         )?;
-        if exists == 0 {
+        if visible == 0 {
             return Err(ApiError::not_found("message not found"));
         }
         let run_id: i64 = tx.query_row(

@@ -1749,7 +1749,7 @@ async fn cross_workspace_access_is_denied() {
         Some(json!({ "topic": "hijacked" })),
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "update stays a 403: it must not confirm existence");
+    assert_eq!(status, StatusCode::NOT_FOUND, "cross-workspace PATCH must be 404");
 
     // beta cannot add itself to alpha's channel (admin + same-workspace checks).
     let (status, _) = call(
@@ -1818,6 +1818,109 @@ async fn cross_workspace_access_is_denied() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "mail into another workspace must be 404");
+
+    // Same for mail by handle: a foreign handle reads as unknown (404).
+    let (status, _) = call(
+        &router,
+        "POST",
+        "/v1/mail",
+        Some(&t1),
+        Some(json!({ "to_handle": "beta", "subject": "s", "body": "b" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "mail by foreign handle must be 404");
+}
+
+#[tokio::test]
+async fn cross_workspace_runs_are_denied() {
+    let router = test_app("wsRuns");
+    let (_a1, t1) = register(&router, "alpha", Some("http://127.0.0.1:9/hook")).await;
+    let (_a2, t2) = register(&router, "beta", Some("http://127.0.0.1:9/hook")).await;
+
+    // alpha's channel message and DM that beta must not be able to reach.
+    let (status, v) = call(
+        &router,
+        "POST",
+        "/v1/channels",
+        Some(&t1),
+        Some(json!({ "name": "eng", "topic": "alpha eng" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    let alpha_chan = v["channel"]["id"].as_i64().unwrap();
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{alpha_chan}/messages"),
+        Some(&t1),
+        Some(json!({ "body": "alpha channel secret" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    let chan_msg = v["message"]["id"].as_i64().unwrap();
+    let (helper_id, _ht) = add_agent(&router, &t1, "helper", None).await;
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/dms/{helper_id}/messages"),
+        Some(&t1),
+        Some(json!({ "body": "alpha dm secret" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    let dm_msg = v["message"]["id"].as_i64().unwrap();
+
+    // beta enumerating alpha's ids gets 404 and no run is created — the
+    // message body must never be delivered to beta's webhook.
+    for msg_id in [chan_msg, dm_msg] {
+        let (status, v) = call(
+            &router,
+            "POST",
+            "/v1/runs",
+            Some(&t2),
+            Some(json!({ "message_id": msg_id })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "foreign message {msg_id} must read as nonexistent: {v}"
+        );
+        let (_, v) = call(&router, "GET", "/v1/runs", Some(&t2), None).await;
+        assert_eq!(v["runs"].as_array().unwrap().len(), 0, "no run may be created for a foreign message");
+    }
+
+    // beta's own channel message is still runnable end to end.
+    let (status, v) = call(
+        &router,
+        "POST",
+        "/v1/channels",
+        Some(&t2),
+        Some(json!({ "name": "eng" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    let beta_chan = v["channel"]["id"].as_i64().unwrap();
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{beta_chan}/messages"),
+        Some(&t2),
+        Some(json!({ "body": "beta own trigger" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    let own_msg = v["message"]["id"].as_i64().unwrap();
+    let (status, v) = call(
+        &router,
+        "POST",
+        "/v1/runs",
+        Some(&t2),
+        Some(json!({ "message_id": own_msg })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "own channel message must still trigger: {v}");
+    assert_eq!(v["run"]["message_id"].as_i64(), Some(own_msg));
 }
 
 #[tokio::test]

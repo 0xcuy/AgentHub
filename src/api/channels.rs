@@ -129,16 +129,22 @@ pub async fn update(
     }
     state.db.try_with(|c| {
         let tx = c.transaction()?;
-        // Workspace scoping: a channel from another workspace must be
-        // invisible, so the membership lookup only matches inside the
-        // caller's workspace and the caller gets the same 403 as a
-        // non-member admin would.
+        // Workspace scoping: a channel from another workspace reads as
+        // nonexistent (404), like every other channel surface. Only then is
+        // the admin check applied (403 for same-workspace non-admins).
+        let in_workspace: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM channels WHERE id = ?1 AND workspace_id = ?2",
+            params![id, agent.workspace_id],
+            |r| r.get(0),
+        )?;
+        if in_workspace == 0 {
+            return Err(ApiError::not_found("channel not found"));
+        }
         let role: Option<String> = tx
             .query_row(
                 "SELECT cm.role FROM channel_members cm
-                 JOIN channels ch ON ch.id = cm.channel_id
-                 WHERE cm.channel_id = ?1 AND cm.agent_id = ?2 AND ch.workspace_id = ?3",
-                params![id, agent.id, agent.workspace_id],
+                 WHERE cm.channel_id = ?1 AND cm.agent_id = ?2",
+                params![id, agent.id],
                 |r| r.get(0),
             )
             .optional()?;
