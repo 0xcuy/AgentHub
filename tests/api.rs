@@ -994,6 +994,274 @@ async fn sse_stream_pushes_inbox_events_only_for_self() {
     let _ = a1;
 }
 
+#[tokio::test]
+async fn inbox_since_returns_only_newer_receipts_ascending() {
+    let router = test_app("inboxSince");
+    let (_, t1) = register(&router, "alphasince", None).await;
+    let (a2, t2) = add_agent(&router, &t1, "betasince", None).await;
+
+    // three DMs, so beta has three receipts in ascending id order
+    let mut bodies = Vec::new();
+    for body in ["one", "two", "three"] {
+        let (status, v) = call(
+            &router,
+            "POST",
+            &format!("/v1/dms/{a2}/messages"),
+            Some(&t1),
+            Some(json!({ "body": body })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        bodies.push(v["message"]["id"].as_i64().unwrap());
+    }
+
+    // without since: newest first, exactly as before
+    let (_, v) = call(&router, "GET", "/v1/inbox", Some(&t2), None).await;
+    let ids: Vec<i64> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["receipt_id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 3);
+    assert!(ids[0] > ids[1] && ids[1] > ids[2], "default order is newest first");
+
+    // since=<oldest>: only the two newer receipts, in ASCENDING order
+    let (status, v) = call(&router, "GET", &format!("/v1/inbox?since={}", ids[2]), Some(&t2), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let since_ids: Vec<i64> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["receipt_id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(since_ids, vec![ids[1], ids[0]], "since must walk forward in ascending order");
+
+    // since past everything: empty
+    let (_, v) = call(&router, "GET", &format!("/v1/inbox?since={}", ids[0]), Some(&t2), None).await;
+    assert_eq!(v["items"].as_array().unwrap().len(), 0);
+
+    // since composes with unread=true: mark the middle message read
+    let (status, _) = call(
+        &router,
+        "POST",
+        "/v1/inbox/read",
+        Some(&t2),
+        Some(json!({ "message_ids": [bodies[1]] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, v) = call(
+        &router,
+        "GET",
+        &format!("/v1/inbox?since={}&unread=true", ids[2]),
+        Some(&t2),
+        None,
+    )
+    .await;
+    let unread_ids: Vec<i64> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["receipt_id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(unread_ids, vec![ids[0]], "since+unread must return only the newer unread receipt");
+
+    // plain unread=true is unchanged: newest first, only the two unread
+    let (_, v) = call(&router, "GET", "/v1/inbox?unread=true", Some(&t2), None).await;
+    let plain_ids: Vec<i64> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["receipt_id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(plain_ids, vec![ids[0], ids[2]], "plain unread=true must stay newest-first");
+}
+
+/// Helper: subscribe `token` to the SSE stream, returning its body reader.
+/// Asserts the SSE handshake succeeded.
+async fn sse_connect(router: &RouterT, uri: &str, token: &str) -> Body {
+    let req = Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = Oneshot::new(router.clone(), req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers().get("content-type").unwrap(),
+        "text/event-stream",
+        "must be an SSE stream"
+    );
+    res.into_body()
+}
+
+#[tokio::test]
+async fn sse_stream_replays_missed_inbox_then_live_without_duplicates() {
+    let router = test_app("sseReplay");
+    let (_, t1) = register(&router, "alphareplay", None).await;
+    let (a2, t2) = add_agent(&router, &t1, "betareplay", None).await;
+
+    // a DM lands BEFORE beta connects: it must be replayed on connect
+    let (status, _) = call(
+        &router,
+        "POST",
+        &format!("/v1/dms/{a2}/messages"),
+        Some(&t1),
+        Some(json!({ "body": "before connect" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let mut body = sse_connect(&router, "/v1/inbox/stream", &t2).await;
+
+    // replay arrives without any new message being sent
+    let mut all = String::new();
+    let mut saw_replay = false;
+    for _ in 0..40 {
+        match tokio::time::timeout(std::time::Duration::from_millis(250), body.frame()).await {
+            Ok(Some(Ok(frame))) => {
+                if let Ok(chunk) = frame.into_data() {
+                    all.push_str(&String::from_utf8_lossy(&chunk));
+                    if all.contains("\"before connect\"") {
+                        saw_replay = true;
+                        break;
+                    }
+                }
+            }
+            _ => continue,
+        }
+    }
+    assert!(saw_replay, "SSE stream must replay the pre-connect DM");
+
+    // a live DM after connect must still be pushed, and only to beta
+    let (status, _) = call(
+        &router,
+        "POST",
+        &format!("/v1/dms/{a2}/messages"),
+        Some(&t1),
+        Some(json!({ "body": "after connect" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let mut saw_live = false;
+    for _ in 0..40 {
+        match tokio::time::timeout(std::time::Duration::from_millis(250), body.frame()).await {
+            Ok(Some(Ok(frame))) => {
+                if let Ok(chunk) = frame.into_data() {
+                    all.push_str(&String::from_utf8_lossy(&chunk));
+                    if all.contains("\"after connect\"") {
+                        saw_live = true;
+                        break;
+                    }
+                }
+            }
+            _ => continue,
+        }
+    }
+    assert!(saw_live, "SSE stream must still push live DMs after replay");
+
+    // keep draining a little: the replayed receipt must never be emitted twice
+    for _ in 0..8 {
+        match tokio::time::timeout(std::time::Duration::from_millis(150), body.frame()).await {
+            Ok(Some(Ok(frame))) => {
+                if let Ok(chunk) = frame.into_data() {
+                    all.push_str(&String::from_utf8_lossy(&chunk));
+                }
+            }
+            _ => continue,
+        }
+    }
+    assert_eq!(
+        all.matches("\"before connect\"").count(),
+        1,
+        "replayed receipt must be emitted exactly once"
+    );
+
+    // alpha, who owns no receipts and receives no DM, gets neither replay nor live
+    let mut other = sse_connect(&router, "/v1/inbox/stream", &t1).await;
+    let mut other_all = String::new();
+    for _ in 0..8 {
+        match tokio::time::timeout(std::time::Duration::from_millis(150), other.frame()).await {
+            Ok(Some(Ok(frame))) => {
+                if let Ok(chunk) = frame.into_data() {
+                    other_all.push_str(&String::from_utf8_lossy(&chunk));
+                }
+            }
+            _ => continue,
+        }
+    }
+    assert!(
+        !other_all.contains("before connect") && !other_all.contains("after connect"),
+        "another agent's stream must see neither beta's replay nor live events"
+    );
+}
+
+#[tokio::test]
+async fn sse_stream_since_param_replays_only_newer_receipts() {
+    let router = test_app("sseSince");
+    let (_, t1) = register(&router, "alphasincex", None).await;
+    let (a2, t2) = add_agent(&router, &t1, "betasincex", None).await;
+
+    // two DMs; capture beta's receipt ids from the list endpoint
+    for body in ["older", "newer"] {
+        let (status, _) = call(
+            &router,
+            "POST",
+            &format!("/v1/dms/{a2}/messages"),
+            Some(&t1),
+            Some(json!({ "body": body })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    let (_, v) = call(&router, "GET", "/v1/inbox", Some(&t2), None).await;
+    let ids: Vec<i64> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["receipt_id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 2);
+    let (older_id, _newest) = (ids[1], ids[0]);
+
+    // connect with since=<older receipt>: only the newer DM may be replayed
+    let mut body = sse_connect(&router, &format!("/v1/inbox/stream?since={older_id}"), &t2).await;
+    let mut all = String::new();
+    let mut saw_newer = false;
+    for _ in 0..40 {
+        match tokio::time::timeout(std::time::Duration::from_millis(250), body.frame()).await {
+            Ok(Some(Ok(frame))) => {
+                if let Ok(chunk) = frame.into_data() {
+                    all.push_str(&String::from_utf8_lossy(&chunk));
+                    if all.contains("\"newer\"") {
+                        saw_newer = true;
+                        break;
+                    }
+                }
+            }
+            _ => continue,
+        }
+    }
+    assert!(saw_newer, "since must replay receipts newer than the cursor");
+    for _ in 0..8 {
+        match tokio::time::timeout(std::time::Duration::from_millis(150), body.frame()).await {
+            Ok(Some(Ok(frame))) => {
+                if let Ok(chunk) = frame.into_data() {
+                    all.push_str(&String::from_utf8_lossy(&chunk));
+                }
+            }
+            _ => continue,
+        }
+    }
+    assert!(
+        !all.contains("\"older\""),
+        "since must not replay receipts at or below the cursor"
+    );
+}
+
 // --- Security fix-now: V1 security headers ---
 
 #[tokio::test]
