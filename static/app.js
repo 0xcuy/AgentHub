@@ -7,6 +7,10 @@
     channels: [],
     agents: [],
     dms: new Map(),      // agentId -> unread count (session-local)
+    // Channel members: there is no GET members endpoint, so `seen` is the set
+    // of senders in loaded messages and may be incomplete. adminProven /
+    // adminDisabled are session-wide and set only by real API outcomes.
+    members: { channelId: null, seen: new Map(), adminProven: false, adminDisabled: false },
   };
 
   const $ = (sel) => document.querySelector(sel);
@@ -84,6 +88,9 @@
   function setComposer(visible, placeholder) {
     composer.hidden = !visible;
     if (placeholder) $('#composer-input').placeholder = placeholder;
+    const isChannel = state.view?.kind === 'channel';
+    $('#members-btn').hidden = !isChannel;
+    if (!isChannel) $('#members-panel').hidden = true;
   }
 
   async function showChannel(id) {
@@ -93,7 +100,10 @@
     paneSub.textContent = ch?.topic || '';
     setComposer(true, `Message #${ch?.name ?? ''}`);
     renderNav();
-    await loadMessages(`/v1/channels/${id}/messages`);
+    const items = await loadMessages(`/v1/channels/${id}/messages`);
+    state.members = { ...state.members, channelId: id, seen: new Map() };
+    collectSeenSenders(items);
+    renderMembersPanel();
   }
 
   async function showDm(agentId) {
@@ -126,11 +136,12 @@
       const items = v.messages ?? [];
       if (items.length === 0) {
         stream.innerHTML = `<div class="empty"><b>No messages yet</b>Send the first one below.</div>`;
-        return;
+        return items;
       }
       stream.innerHTML = items.slice().reverse().map(msgHtml).join('');
       const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
       stream.scrollTo({ top: stream.scrollHeight, behavior: reduced ? 'auto' : 'smooth' });
+      return items;
     } catch (e) {
       stream.innerHTML = `<div class="empty"><b>Couldn't load messages</b>${esc(e.message)} <button class="btn" id="retry">Retry</button></div>`;
       $('#retry')?.addEventListener('click', () => state.view.kind === 'channel'
@@ -626,7 +637,9 @@
           method: 'POST', headers: { 'Idempotency-Key': uuid() },
           body: JSON.stringify({ body: text }),
         });
-        await loadMessages(`/v1/channels/${state.view.id}/messages`);
+        const items = await loadMessages(`/v1/channels/${state.view.id}/messages`);
+        collectSeenSenders(items);
+        renderMembersPanel();
       } else if (state.view?.kind === 'dm') {
         await api(`/v1/dms/${state.view.id}/messages`, {
           method: 'POST', headers: { 'Idempotency-Key': uuid() },
@@ -652,6 +665,121 @@
       stream.insertAdjacentHTML('afterbegin',
         `<div class="empty" style="padding:var(--sp-3)" role="alert">Send failed: ${esc(err.message)}</div>`);
     }
+  });
+
+  /* ---------- channel members panel ---------- */
+  // No GET members endpoint exists: the visible list is the set of senders in
+  // the channel's loaded messages, labelled as such. There is no "my role"
+  // endpoint either, so admin controls are rendered and the API enforces them:
+  // a 403 disables them for the rest of the session.
+  const isMembersForbidden = (err) => /only channel admins can (add|remove) members/.test(err.message);
+
+  function collectSeenSenders(items) {
+    for (const m of items ?? []) {
+      if (m.sender_id != null && !state.members.seen.has(m.sender_id)) {
+        state.members.seen.set(m.sender_id, m.sender_handle);
+      }
+    }
+  }
+
+  function membersRowHtml(id, handle) {
+    const you = id === state.me.agent.id;
+    const admin = you && state.members.adminProven ? '<span class="badge">admin</span>' : '';
+    return `
+      <div class="row">
+        ${avatarEl(handle)}
+        <div class="grow"><b class="mono">@${esc(handle)}</b>
+          ${you ? '<span class="badge ok"><span class="dot"></span>you</span>' : ''} ${admin}</div>
+        ${state.members.adminDisabled ? '' : `<button class="btn" data-member-remove="${id}">Remove</button>`}
+      </div>`;
+  }
+
+  function renderMembersPanel() {
+    const panel = $('#members-panel');
+    if (panel.hidden) return;
+    const candidates = state.agents.filter((a) => !state.members.seen.has(a.id));
+    panel.innerHTML = `
+      <div class="members-head">
+        <b>Members seen in this channel</b>
+        <span class="faint">No member-list API — derived from message senders, so it may be incomplete.</span>
+      </div>
+      ${[...state.members.seen].map(([id, h]) => membersRowHtml(id, h)).join('')
+        || '<p class="faint" style="margin:0">Nobody has posted here yet.</p>'}
+      <p class="faint" id="members-msg" role="alert" style="min-height:1.2em;margin:var(--sp-2) 0 0"></p>
+      ${state.members.adminDisabled
+        ? '<p class="faint" style="margin:0">Only channel admins can add or remove members.</p>'
+        : candidates.length === 0
+          ? '<p class="faint" style="margin:0">Every workspace agent is already listed.</p>'
+          : `<form id="members-add" class="members-add">
+              <div class="field" style="flex:1;min-width:0">
+                <label for="members-select">Add member</label>
+                <select id="members-select">${candidates
+                  .map((a) => `<option value="${a.id}">@${esc(a.handle)}</option>`)
+                  .join('')}</select>
+              </div>
+              <button class="btn btn-primary" type="submit">Add</button>
+            </form>`}`;
+    panel.querySelectorAll('[data-member-remove]').forEach((b) =>
+      b.addEventListener('click', () => removeMember(+b.dataset.memberRemove, b)));
+    $('#members-add')?.addEventListener('submit', addMember);
+  }
+
+  async function addMember(e) {
+    e.preventDefault();
+    const msg = $('#members-msg');
+    const select = $('#members-select');
+    const id = +select.value;
+    const agent = state.agents.find((a) => a.id === id);
+    msg.textContent = '';
+    try {
+      await api(`/v1/channels/${state.view.id}/members`, {
+        method: 'POST',
+        body: JSON.stringify({ agent_ids: [id] }),
+      });
+      state.members.adminProven = true;
+      state.members.seen.set(id, agent?.handle ?? `#${id}`);
+      renderMembersPanel();
+      $('#members-msg').textContent = `@${agent?.handle ?? id} added — they can now read and post here`;
+    } catch (err) {
+      if (isMembersForbidden(err)) {
+        state.members.adminDisabled = true;
+        renderMembersPanel();
+        $('#members-msg').textContent = 'Only channel admins can add or remove members';
+      } else {
+        msg.textContent = err.message;
+      }
+    }
+  }
+
+  async function removeMember(id, btn) {
+    if (btn.dataset.confirm !== '1') {
+      btn.dataset.confirm = '1';
+      btn.textContent = 'Confirm remove';
+      return;
+    }
+    const msg = $('#members-msg');
+    msg.textContent = '';
+    try {
+      await api(`/v1/channels/${state.view.id}/members/${id}`, { method: 'DELETE' });
+      state.members.adminProven = true;
+      state.members.seen.delete(id);
+      renderMembersPanel();
+    } catch (err) {
+      if (isMembersForbidden(err)) {
+        state.members.adminDisabled = true;
+        renderMembersPanel();
+        $('#members-msg').textContent = 'Only channel admins can add or remove members';
+      } else {
+        msg.textContent = err.message;
+      }
+    }
+  }
+
+  $('#members-btn').addEventListener('click', () => {
+    const panel = $('#members-panel');
+    panel.hidden = !panel.hidden;
+    $('#members-btn').setAttribute('aria-expanded', String(!panel.hidden));
+    if (!panel.hidden) renderMembersPanel();
   });
 
   /* ---------- dialogs, logout, drawer ---------- */
