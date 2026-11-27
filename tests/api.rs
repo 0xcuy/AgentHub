@@ -348,6 +348,116 @@ async fn channel_flow() {
     assert_eq!(v["items"].as_array().unwrap().len(), 0);
 }
 
+// --- Urgency: urgent flag on channel messages ---
+
+#[tokio::test]
+async fn urgent_flag_on_channel_messages() {
+    let (base, received) = start_webhook_server().await;
+    let router = test_app("urgent");
+    let (a1, t1) = register(&router, "alpha", None).await;
+    // beta has a webhook, so channel messages to beta produce deliveries
+    // whose payloads must carry the urgent flag.
+    let (a2, t2) = add_agent(&router, &t1, "beta", Some(&format!("{base}/run"))).await;
+
+    let (status, v) = call(
+        &router,
+        "POST",
+        "/v1/channels",
+        Some(&t1),
+        Some(json!({ "name": "ops", "member_ids": [a1, a2] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    let chan = v["channel"]["id"].as_i64().unwrap();
+
+    // urgent message: the flag is stored and echoed back
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{chan}/messages"),
+        Some(&t1),
+        // wake: true — since lens 1 the channel default is mentions-only wake,
+        // so an urgent message with no @-mention would never reach the webhook.
+        Some(json!({ "body": "prod is down", "urgent": true, "wake": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    let urgent_id = v["message"]["id"].as_i64().unwrap();
+    assert_eq!(v["message"]["urgent"], true, "urgent must round-trip");
+
+    // explicit non-urgent and omitted flag both default to false
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{chan}/messages"),
+        Some(&t1),
+        Some(json!({ "body": "all clear", "urgent": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    let normal_id = v["message"]["id"].as_i64().unwrap();
+    assert_eq!(v["message"]["urgent"], false);
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{chan}/messages"),
+        Some(&t1),
+        Some(json!({ "body": "no flag" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    assert_eq!(v["message"]["urgent"], false, "omitted flag must default to false");
+
+    // GET channel messages returns the flag for both
+    let (status, v) = call(
+        &router,
+        "GET",
+        &format!("/v1/channels/{chan}/messages"),
+        Some(&t2),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let messages = v["messages"].as_array().unwrap();
+    let urgent = messages
+        .iter()
+        .find(|m| m["id"].as_i64() == Some(urgent_id))
+        .expect("urgent message must be listed");
+    assert_eq!(urgent["urgent"], true);
+    let normal = messages
+        .iter()
+        .find(|m| m["id"].as_i64() == Some(normal_id))
+        .expect("normal message must be listed");
+    assert_eq!(normal["urgent"], false);
+
+    // the inbox response carries the flag too
+    let (status, v) = call(&router, "GET", "/v1/inbox?unread=true", Some(&t2), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let items = v["items"].as_array().unwrap();
+    let urgent_item = items
+        .iter()
+        .find(|i| i["message"]["id"].as_i64() == Some(urgent_id))
+        .expect("urgent message must be in beta's inbox");
+    assert_eq!(urgent_item["message"]["urgent"], true);
+
+    // the webhook payload for the urgent channel message includes the flag
+    let mut got_payload = false;
+    for _ in 0..40 {
+        if let Some(p) = received
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|p| p["message"]["body"] == "prod is down")
+        {
+            assert_eq!(p["message"]["urgent"], true, "webhook payload must carry the flag");
+            got_payload = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert!(got_payload, "webhook never received the urgent message payload");
+}
+
 // --- DMs ---
 
 #[tokio::test]

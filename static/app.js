@@ -87,6 +87,7 @@
   /* ---------- views ---------- */
   function setComposer(visible, placeholder) {
     composer.hidden = !visible;
+    $('#urgent-toggle').hidden = true; // only the channel view shows it
     if (placeholder) $('#composer-input').placeholder = placeholder;
     const isChannel = state.view?.kind === 'channel';
     $('#members-btn').hidden = !isChannel;
@@ -103,6 +104,7 @@
          <span class="faint" id="wake-msg" style="margin-left:6px"></span>`
       : '';
     setComposer(true, `Message #${ch?.name ?? ''}`);
+    $('#urgent-toggle').hidden = false;
     renderNav();
     $('#wake-toggle')?.addEventListener('click', toggleWakeMode);
     const items = await loadMessages(`/v1/channels/${id}/messages`);
@@ -149,7 +151,7 @@
       <div class="msg ${mine ? 'mine' : ''}">
         ${avatarEl(m.sender_handle)}
         <div style="min-width:0">
-          <div class="head"><b>${esc(m.sender_handle)}</b>
+          <div class="head"><b>${esc(m.sender_handle)}</b>${m.urgent ? '<span class="urgent-badge">urgent</span>' : ''}
             <span class="when num"> ${when(m.created_at)}</span></div>
           <p class="body">${esc(m.body)}</p>
         </div>
@@ -690,10 +692,12 @@
     input.value = '';
     try {
       if (state.view?.kind === 'channel') {
+        const urgent = $('#composer-urgent').checked;
         await api(`/v1/channels/${state.view.id}/messages`, {
           method: 'POST', headers: { 'Idempotency-Key': uuid() },
-          body: JSON.stringify({ body: text }),
+          body: JSON.stringify({ body: text, urgent }),
         });
+        $('#composer-urgent').checked = false;
         const items = await loadMessages(`/v1/channels/${state.view.id}/messages`);
         collectSeenSenders(items);
         renderMembersPanel();
