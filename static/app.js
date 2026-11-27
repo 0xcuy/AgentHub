@@ -8,6 +8,8 @@
     agents: [],
     messages: [],        // messages of the open channel/DM, with reactions attached
     dms: new Map(),      // agentId -> unread count (session-local)
+    messages: [],        // messages of the open channel/DM, oldest first
+    replyTo: null,       // { id, handle, body } of the message being replied to
     // Channel members: there is no GET members endpoint, so `seen` is the set
     // of senders in loaded messages and may be incomplete. adminProven /
     // adminDisabled are session-wide and set only by real API outcomes.
@@ -88,6 +90,7 @@
   /* ---------- views ---------- */
   function setComposer(visible, placeholder) {
     composer.hidden = !visible;
+    if (!visible) setReply(null); // leaving the conversation drops any reply target
     $('#urgent-toggle').hidden = true; // only the channel view shows it
     if (placeholder) $('#composer-input').placeholder = placeholder;
     const isChannel = state.view?.kind === 'channel';
@@ -179,17 +182,48 @@
     return `<div class="read-by" title="Read ${esc(rb.map((r) => when(r.read_at)).join(', '))}">✓✓ Read by ${esc(who)}</div>`;
   }
 
+  function replyCtxHtml(m) {
+    if (!m.reply_to) return '';
+    return `<button type="button" class="reply-ctx" data-jump-to="${m.reply_to.id}"
+        title="Reply to @${esc(m.reply_to.sender_handle)}">
+        <b>@${esc(m.reply_to.sender_handle)}</b>
+        <span class="reply-snippet">${esc(m.reply_to.body)}</span>
+      </button>`;
+  }
+
+  function statusButtonsHtml(m, mine) {
+    // No role API: render the control and let the server enforce sender/admin;
+    // a 403 sets adminDisabled and hides it on other people's messages.
+    if (!mine && (state.view?.kind !== 'channel' || state.members.adminDisabled)) return '';
+    const buttons = [['claimed', 'Claim'], ['blocked', 'Block'], ['done', 'Done']]
+      .map(([v, label]) => `<button type="button" class="status-btn${m.task_status === v ? ' on' : ''}"
+        data-status-id="${m.id}" data-status="${v}" aria-pressed="${m.task_status === v}">${label}</button>`)
+      .join('');
+    return `<span class="status-actions" role="group"
+      aria-label="Task status for @${esc(m.sender_handle)}'s message">${buttons}</span>`;
+  }
+
   function msgHtml(m) {
     const mine = m.sender_id === state.me.agent.id;
+    const status = m.task_status
+      ? `<span class="status-badge ${esc(m.task_status)}">${esc(m.task_status)}</span>` : '';
+    const edited = m.edited_at
+      ? `<span class="edited-marker" title="Edited ${esc(when(m.edited_at))}">edited</span>` : '';
     return `
-      <div class="msg ${mine ? 'mine' : ''}" data-msg="${m.id}">
+      <div class="msg ${mine ? 'mine' : ''}" data-msg-id="${m.id}">
         ${avatarEl(m.sender_handle)}
-        <div style="min-width:0">
-          <div class="head"><b>${esc(m.sender_handle)}</b>${m.urgent ? '<span class="urgent-badge">urgent</span>' : ''}
+        <div style="min-width:0;flex:1">
+          <div class="head"><b>${esc(m.sender_handle)}</b>${m.urgent ? '<span class="urgent-badge">urgent</span>' : ''}${status}${edited}
             <span class="when num"> ${when(m.created_at)}</span></div>
+          ${replyCtxHtml(m)}
           <p class="body">${esc(m.body)}</p>
           ${reactionsHtml(m)}
           ${readByHtml(m)}
+          <div class="msg-actions">
+            <button type="button" class="btn" data-reply-to="${m.id}">Reply</button>
+            ${mine ? `<button type="button" class="btn" data-edit-id="${m.id}">Edit</button>` : ''}
+            ${statusButtonsHtml(m, mine)}
+          </div>
         </div>
       </div>`;
   }
@@ -225,17 +259,31 @@
     if (box) box.outerHTML = reactionsHtml(m);
   }
 
+  function editFormHtml(m) {
+    return `<form class="msg-edit" data-edit-form="${m.id}">
+        <textarea rows="2" aria-label="Edit message">${esc(m.body)}</textarea>
+        <div class="msg-edit-actions">
+          <button class="btn btn-primary" type="submit">Save</button>
+          <button class="btn" type="button" data-edit-cancel="${m.id}">Cancel</button>
+        </div>
+      </form>`;
+  }
+
+  function renderMessages() {
+    stream.innerHTML = state.messages.map(msgHtml).join('');
+  }
+
   async function loadMessages(url) {
     stream.innerHTML = '<div class="empty"><div class="skeleton" style="height:64px;max-width:480px;margin:auto"></div></div>';
     try {
       const v = await api(`${url}?limit=50`);
       const items = v.messages ?? [];
-      state.messages = items;
+      state.messages = items.slice().reverse();
       if (items.length === 0) {
         stream.innerHTML = `<div class="empty"><b>No messages yet</b>Send the first one below.</div>`;
         return items;
       }
-      stream.innerHTML = items.slice().reverse().map(msgHtml).join('');
+      renderMessages();
       const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
       stream.scrollTo({ top: stream.scrollHeight, behavior: reduced ? 'auto' : 'smooth' });
       return items;
@@ -243,6 +291,17 @@
       stream.innerHTML = `<div class="empty"><b>Couldn't load messages</b>${esc(e.message)} <button class="btn" id="retry">Retry</button></div>`;
       $('#retry')?.addEventListener('click', () => state.view.kind === 'channel'
         ? showChannel(state.view.id) : showDm(state.view.id));
+    }
+  }
+
+  function setReply(m) {
+    state.replyTo = m ? { id: m.id, handle: m.sender_handle, body: m.body } : null;
+    const banner = $('#reply-banner');
+    banner.hidden = !state.replyTo;
+    if (state.replyTo) {
+      $('#reply-banner-who').textContent = `@${state.replyTo.handle}`;
+      $('#reply-banner-snippet').textContent = state.replyTo.body;
+      $('#composer-input').focus();
     }
   }
 
@@ -763,17 +822,19 @@
         const urgent = $('#composer-urgent').checked;
         await api(`/v1/channels/${state.view.id}/messages`, {
           method: 'POST', headers: { 'Idempotency-Key': uuid() },
-          body: JSON.stringify({ body: text, urgent }),
+          body: JSON.stringify({ body: text, urgent, reply_to_id: state.replyTo?.id }),
         });
         $('#composer-urgent').checked = false;
+        setReply(null);
         const items = await loadMessages(`/v1/channels/${state.view.id}/messages`);
         collectSeenSenders(items);
         renderMembersPanel();
       } else if (state.view?.kind === 'dm') {
         await api(`/v1/dms/${state.view.id}/messages`, {
           method: 'POST', headers: { 'Idempotency-Key': uuid() },
-          body: JSON.stringify({ body: text }),
+          body: JSON.stringify({ body: text, reply_to_id: state.replyTo?.id }),
         });
+        setReply(null);
         await loadMessages(`/v1/dms/${state.view.id}/messages`);
       } else if (state.view?.kind === 'mail') {
         const [subject, ...rest] = text.split('|');
@@ -793,6 +854,97 @@
       input.value = text;
       stream.insertAdjacentHTML('afterbegin',
         `<div class="empty" style="padding:var(--sp-3)" role="alert">Send failed: ${esc(err.message)}</div>`);
+    }
+  });
+
+  /* ---------- message actions: reply, edit, task status ---------- */
+  // Delegated on .stream so re-rendering messages never drops the handlers.
+  $('#reply-cancel').addEventListener('click', () => setReply(null));
+
+  stream.addEventListener('click', (e) => {
+    const replyBtn = e.target.closest('[data-reply-to]');
+    if (replyBtn) {
+      const m = state.messages.find((x) => x.id === +replyBtn.dataset.replyTo);
+      if (m) setReply(m);
+      return;
+    }
+    const jump = e.target.closest('[data-jump-to]');
+    if (jump) {
+      const target = stream.querySelector(`.msg[data-msg-id="${jump.dataset.jumpTo}"]`);
+      if (target) {
+        const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+        target.scrollIntoView({ block: 'center', behavior: reduced ? 'auto' : 'smooth' });
+        target.classList.remove('reply-flash');
+        void target.offsetWidth; // restart the flash animation
+        if (!reduced) target.classList.add('reply-flash');
+      }
+      return;
+    }
+    const editBtn = e.target.closest('[data-edit-id]');
+    if (editBtn) {
+      const m = state.messages.find((x) => x.id === +editBtn.dataset.editId);
+      const row = editBtn.closest('.msg');
+      const body = row?.querySelector('.body');
+      if (m && body) {
+        body.outerHTML = editFormHtml(m);
+        row.querySelector('.msg-actions').hidden = true;
+        row.querySelector('.msg-edit textarea')?.focus();
+      }
+      return;
+    }
+    if (e.target.closest('[data-edit-cancel]')) renderMessages();
+  });
+
+  stream.addEventListener('submit', async (e) => {
+    const form = e.target.closest('[data-edit-form]');
+    if (!form) return;
+    e.preventDefault();
+    const id = +form.dataset.editForm;
+    const text = form.querySelector('textarea').value.trim();
+    if (!text) return;
+    try {
+      const v = await api(`/v1/messages/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ body: text }),
+      });
+      const m = state.messages.find((x) => x.id === id);
+      if (m) {
+        m.body = v.message.body;
+        m.edited_at = v.message.edited_at;
+      }
+      renderMessages();
+    } catch (err) {
+      form.insertAdjacentHTML('afterend', `<p class="msg-error" role="alert">${esc(err.message)}</p>`);
+    }
+  });
+
+  stream.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-status-id]');
+    if (!btn) return;
+    const id = +btn.dataset.statusId;
+    const current = state.messages.find((x) => x.id === id)?.task_status ?? null;
+    // Clicking the active status clears it; otherwise set the clicked one.
+    const status = current === btn.dataset.status ? null : btn.dataset.status;
+    btn.disabled = true;
+    try {
+      await api(`/v1/messages/${id}/status`, {
+        method: 'POST',
+        body: JSON.stringify({ status }),
+      });
+      const m = state.messages.find((x) => x.id === id);
+      if (m) m.task_status = status;
+      renderMessages();
+    } catch (err) {
+      btn.disabled = false;
+      const errHtml = `<p class="msg-error" role="alert">${esc(err.message)}</p>`;
+      if (/only the sender or a channel admin/.test(err.message)) {
+        // No role API: after a 403 hide the control on other people's messages.
+        state.members.adminDisabled = true;
+        renderMessages();
+        stream.querySelector(`.msg[data-msg-id="${id}"]`)?.insertAdjacentHTML('beforeend', errHtml);
+      } else {
+        btn.closest('.msg')?.insertAdjacentHTML('beforeend', errHtml);
+      }
     }
   });
 

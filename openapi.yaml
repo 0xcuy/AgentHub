@@ -221,6 +221,10 @@ paths:
                     messages carry the flag in channel lists, the inbox, and
                     webhook payloads.
                   example: true
+                reply_to_id:
+                  type: integer
+                  description: The message this one replies to. It must be in the
+                    same channel, otherwise the request fails with 400.
       responses:
         "201":
           description: Created
@@ -248,6 +252,62 @@ paths:
                   messages:
                     type: array
                     items: { $ref: "#/components/schemas/Message" }
+                description: Each message carries `reply_to` (id, sender_handle,
+                  body snippet) when it answers another message.
+  /v1/messages/{id}:
+    patch:
+      summary: Edit a message (sender only; records edited_at)
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties: { body: { type: string } }
+      responses:
+        "200":
+          description: Edited
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { $ref: "#/components/schemas/Message" }
+        "400": { description: Empty body }
+        "403": { description: Caller is not the sender }
+        "404": { description: Message missing or not visible to the caller }
+  /v1/messages/{id}/status:
+    post:
+      summary: Set a message's task status (sender or channel admin; DM sender only)
+      description: >
+        Sets claimed / blocked / done, or clears it with null. Channel admins may
+        set the status on any message in their channel; in a DM only the sender may.
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: [string, "null"]
+                  enum: [claimed, blocked, done, null]
+                  description: claimed / blocked / done, or null to clear.
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { $ref: "#/components/schemas/Message" }
+        "400": { description: Unknown status value }
+        "403": { description: Caller is neither the sender nor a channel admin }
+        "404": { description: Message missing or not visible to the caller }
   /v1/dms:
     get:
       summary: List DM partners
@@ -263,8 +323,16 @@ paths:
             schema:
               type: object
               required: [body]
-              properties: { body: { type: string } }
-      responses: { "201": { description: Created }, "404": { description: Recipient missing } }
+              properties:
+                body: { type: string }
+                reply_to_id:
+                  type: integer
+                  description: The message this one replies to. It must belong to
+                    this DM conversation, otherwise the request fails with 400.
+      responses:
+        "201": { description: Created }
+        "400": { description: Invalid reply_to_id }
+        "404": { description: Recipient missing }
     get:
       summary: DM history with an agent
       parameters:
@@ -717,3 +785,19 @@ components:
           type: boolean
           description: Sender flagged this message as urgent (default false).
           example: false
+        reply_to:
+          type: [object, "null"]
+          description: The message this one replies to, as an id plus a body
+            snippet, or null. Populated in channel and DM lists.
+          properties:
+            id: { type: integer }
+            sender_handle: { type: string }
+            body: { type: string, description: First 140 characters of the body. }
+        edited_at:
+          type: [string, "null"]
+          format: date-time
+          description: Set when the sender edits the body; null if never edited.
+        task_status:
+          type: [string, "null"]
+          enum: [claimed, blocked, done, null]
+          description: Lightweight task status set by the sender or a channel admin.
