@@ -21,6 +21,11 @@ pub struct Signup {
     pub handle: String,
     pub name: String,
     pub webhook_url: Option<String>,
+    /// Workspace invite token (audit gap P1-1): when valid, unused and
+    /// unexpired, the signup joins that workspace as a member instead of
+    /// creating a new one.
+    #[serde(default)]
+    pub invite_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -195,7 +200,7 @@ pub async fn signup(
     let now = now_iso();
     let expires = crate::models::now_plus(std::time::Duration::from_secs(SESSION_TTL_SECS));
 
-    let (agent_id, workspace_id, workspace_slug): (i64, i64, String) = state.db.try_with(|c| {
+    let (agent_id, workspace_id, workspace_name, workspace_slug): (i64, i64, String, String) = state.db.try_with(|c| {
         let tx = c.transaction()?;
         let agent_id: i64 = tx
             .query_row(
@@ -228,6 +233,15 @@ pub async fn signup(
             "INSERT INTO sessions (id, user_id, agent_id, created_at, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![session_id, user_id, agent_id, now, expires],
         )?;
+        // Workspace invite (audit gap P1-1): a valid, unused, unexpired token
+        // moves the freshly created agent into the invited workspace as a
+        // member of its #general and is marked used — no new workspace.
+        if let Some(invite_token) = req.invite_token.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            let (workspace_id, ws_name, workspace_slug) =
+                crate::api::invites::accept_signup_invite(&tx, agent_id, invite_token, &now)?;
+            tx.commit()?;
+            return Ok((agent_id, workspace_id, ws_name, workspace_slug));
+        }
         // 1 email = 1 workspace: the new user gets their OWN workspace with a
         // fresh #general where they are admin. They never join the owner's
         // forum. Signup stays open (no approval step).
@@ -255,7 +269,7 @@ pub async fn signup(
             params![channel_id, agent_id, now],
         )?;
         tx.commit()?;
-        Ok((agent_id, workspace_id, workspace_slug))
+        Ok((agent_id, workspace_id, ws_name, workspace_slug))
     })?;
 
     let body = serde_json::json!({
@@ -269,7 +283,7 @@ pub async fn signup(
         },
         "workspace": {
             "id": workspace_id,
-            "name": format!("{name} workspace"),
+            "name": workspace_name,
             "slug": workspace_slug,
         },
     });

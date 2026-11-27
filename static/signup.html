@@ -77,6 +77,32 @@
     .auth-shell { grid-template-columns: 1fr; justify-items: center; }
     .auth-side { display: none; }
   }
+
+  /* invite banner (arriving via /invite/<token>) */
+  .invite-banner { display: none; align-items: center; gap: 10px; margin-bottom: var(--sp-4);
+    border: 1px solid rgba(52, 211, 153, .35); background: rgba(52, 211, 153, .08);
+    color: var(--ok); border-radius: var(--r-md); padding: 10px var(--sp-3); font-size: var(--fs-sm); line-height: 1.5; }
+  .invite-banner.show { display: flex; }
+  .invite-banner.err { border-color: rgba(251, 113, 133, .35); background: rgba(251, 113, 133, .08); color: var(--err); }
+  .invite-banner b { color: inherit; font-weight: 600; }
+
+  /* invites panel (collapses to a copy-link when not signed in as an admin) */
+  .invites-panel { width: 100%; max-width: 430px; justify-self: center; margin-top: var(--sp-5);
+    border: 1px solid var(--border-strong); border-radius: var(--r-lg);
+    background: rgba(14, 19, 38, .6); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+    padding: 18px var(--sp-5) var(--sp-5); }
+  .invites-panel h2 { font-size: var(--fs-md); letter-spacing: -.01em; margin: 0 0 4px; }
+  .invites-panel .panel-sub { color: var(--muted); font-size: var(--fs-xs); margin: 0 0 12px; }
+  .invites-panel .panel-actions { display: flex; gap: var(--sp-2); align-items: center; }
+  .invites-panel .btn-ghost { flex: none; min-height: 38px; padding: 8px 14px; font-size: var(--fs-sm);
+    border-radius: var(--r-md); border: 1px solid var(--border-strong); background: rgba(139,123,255,.08); color: var(--heading); cursor: pointer; }
+  .invites-panel .btn-ghost:hover { background: rgba(139,123,255,.16); }
+  .invite-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--border); font-size: var(--fs-xs); }
+  .invite-row code { font-family: var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .badge { flex: none; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+  .badge.active { color: var(--ok); border-color: rgba(52,211,153,.4); }
+  .badge.used { color: var(--faint); }
+  .badge.expired { color: var(--err); border-color: rgba(251,113,133,.35); }
 </style>
 </head>
 <body>
@@ -103,6 +129,7 @@
   <section class="auth-card" aria-label="Create your hub">
     <h1>Create <span class="serif-it grad-text">your hub</span></h1>
     <p class="sub">Registers a human account <em>and</em> your first agent — the agent keeps a bearer token for <span class="mono">/v1</span>.</p>
+    <div class="invite-banner" id="invite-banner" role="status"></div>
     <div class="form-alert" id="alert" role="alert"></div>
     <form id="signup-form" novalidate>
       <div class="field">
@@ -135,6 +162,16 @@
       <button class="btn btn-primary" type="submit" id="submit">Create your hub</button>
     </form>
     <p class="alt">Already have an account? <a href="/login">Sign in</a></p>
+  </section>
+
+  <section class="invites-panel" id="invites-panel" aria-label="Workspace invites" hidden>
+    <h2>Workspace invites</h2>
+    <p class="panel-sub" id="invites-sub">Mint a one-time link that adds a teammate to this workspace when they sign up. Valid for 7 days.</p>
+    <div class="panel-actions">
+      <button class="btn-ghost" id="invite-create" type="button">Create invite link</button>
+      <button class="btn-ghost" id="invite-refresh" type="button" hidden>Refresh</button>
+    </div>
+    <div id="invite-list"></div>
   </section>
 </main>
 
@@ -174,7 +211,7 @@ form.addEventListener('submit', async (e) => {
     const res = await fetch('/ui/signup', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password, handle, name, webhook_url: webhook || null }),
+      body: JSON.stringify({ email, password, handle, name, webhook_url: webhook || null, invite_token: inviteToken }),
     });
     if (!res.ok) {
       const v = await res.json().catch(() => ({ error: { message: 'Sign up failed' } }));
@@ -185,6 +222,123 @@ form.addEventListener('submit', async (e) => {
     location.href = '/app';
   } catch { showAlert('Network error — try again.'); btn.disabled = false; btn.textContent = 'Create your hub'; }
 });
+
+/* ---- workspace invites (audit gap P1-1) ---- */
+let inviteToken = null;
+let bearer = null;
+
+async function apiJson(path, opts) {
+  opts = Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts);
+  if (bearer) opts.headers.Authorization = 'Bearer ' + bearer;
+  const res = await fetch(path, opts);
+  const v = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((v.error && v.error.message) || 'Request failed');
+  return v;
+}
+
+function copyInvite(token) {
+  const link = location.origin + '/invite/' + token;
+  const done = () => {};
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(done, done);
+  return link;
+}
+
+function renderInvites(rows) {
+  const list = document.getElementById('invite-list');
+  list.textContent = '';
+  for (const inv of rows) {
+    const row = document.createElement('div');
+    row.className = 'invite-row';
+    const code = document.createElement('code');
+    code.textContent = location.origin + '/invite/' + inv.token;
+    const badge = document.createElement('span');
+    badge.className = 'badge ' + inv.status;
+    badge.textContent = inv.status;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn-ghost';
+    btn.textContent = 'Copy link';
+    btn.addEventListener('click', () => { btn.textContent = 'Copied'; copyInvite(inv.token); setTimeout(() => { btn.textContent = 'Copy link'; }, 1500); });
+    row.append(code, badge, btn);
+    list.appendChild(row);
+  }
+  if (!rows.length) {
+    const p = document.createElement('p');
+    p.className = 'panel-sub';
+    p.textContent = 'No invites yet.';
+    list.appendChild(p);
+  }
+}
+
+async function loadInvites() {
+  try {
+    const v = await apiJson('/v1/workspaces/invites');
+    document.getElementById('invite-create').hidden = true;
+    document.getElementById('invite-refresh').hidden = false;
+    renderInvites(v.invites || []);
+  } catch { hideInvitesPanel(); }
+}
+
+function hideInvitesPanel() {
+  const panel = document.getElementById('invites-panel');
+  if (panel) panel.remove();
+}
+
+async function showInvitesPanel() {
+  try {
+    const me = await apiJson('/ui/api/me');
+    if (!me || !me.workspace || !me.workspace.name) return hideInvitesPanel();
+    bearer = me.agent && me.agent.token;
+    document.getElementById('invites-panel').hidden = false;
+    document.getElementById('invites-sub').textContent =
+      'Invites for ' + me.workspace.name + ' — a one-time link adds a teammate here when they sign up. Valid for 7 days.';
+    await loadInvites();
+  } catch { hideInvitesPanel(); }
+}
+
+document.getElementById('invite-create').addEventListener('click', async () => {
+  const btn = document.getElementById('invite-create');
+  btn.disabled = true; btn.textContent = 'Creating…';
+  try {
+    await apiJson('/v1/workspaces/invites', { method: 'POST', body: JSON.stringify({ base_url: location.origin }) });
+    await loadInvites();
+  } catch (e) {
+    showAlert(e.message || 'Could not create invite');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Create invite link';
+  }
+});
+document.getElementById('invite-refresh').addEventListener('click', loadInvites);
+
+(async function initInvites() {
+  // /invite/<token> serves this page: greet the visitor and remember the token.
+  const m = location.pathname.match(/^\/invite\/([A-Za-z0-9]+)\/?$/);
+  if (m) {
+    inviteToken = m[1];
+    const banner = document.getElementById('invite-banner');
+    try {
+      const info = await apiJson('/ui/api/invite-info/' + inviteToken);
+      banner.classList.add('show');
+      if (info.status === 'active') {
+        banner.innerHTML = 'You have been invited to join <b></b>. Create your account below to accept.';
+        banner.querySelector('b').textContent = info.workspace_name;
+      } else if (info.status === 'used') {
+        banner.classList.add('err');
+        banner.textContent = 'This invite link has already been used.';
+      } else if (info.status === 'expired') {
+        banner.classList.add('err');
+        banner.textContent = 'This invite link has expired.';
+      } else {
+        banner.classList.add('err');
+        banner.textContent = 'This invite link is not valid.';
+      }
+    } catch {
+      banner.classList.add('show', 'err');
+      banner.textContent = 'This invite link is not valid.';
+    }
+  }
+  showInvitesPanel();
+})();
 </script>
 </body>
 </html>
