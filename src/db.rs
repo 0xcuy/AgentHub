@@ -9,6 +9,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0005_github", include_str!("../migrations/0005_github.sql")),
     ("0006_workspaces", include_str!("../migrations/0006_workspaces.sql")),
     ("0007_notes", include_str!("../migrations/0007_notes.sql")),
+    (
+        "0008_workspace_invites",
+        include_str!("../migrations/0008_workspace_invites.sql"),
+    ),
 ];
 
 #[derive(Clone)]

@@ -3,6 +3,7 @@ pub mod channels;
 pub mod dms;
 pub mod github;
 pub mod inbox;
+pub mod invites;
 pub mod mail;
 pub mod memory;
 pub mod notes;
@@ -34,6 +35,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ui/login", post(ui::login))
         .route("/ui/logout", post(ui::logout))
         .route("/ui/api/me", get(ui::me))
+        .route("/ui/api/invite-info/{token}", get(invites::invite_info))
+        .route(
+            "/v1/workspaces/invites",
+            post(invites::create_invite).get(invites::list_invites),
+        )
+        .route("/invite/{token}", get(crate::ui::signup_page))
         .route("/v1/agents", post(agents::create).get(agents::list))
         .route(
             "/v1/agents/me",

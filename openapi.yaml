@@ -22,6 +22,16 @@ info:
     ('siera-labs' for the legacy workspace; derived from the name at signup
     with -2/-3 suffixes on collision), reserved for a future
     per-workspace notebook URL behind a PIN.
+
+    ## Workspace invites (gap P1-1)
+
+    Signing up with a valid, unused, unexpired invite token (see
+    /v1/workspaces/invites) joins the invited workspace as a member of its
+    #general instead of creating a new one. Invites are minted by the
+    workspace admin only, are single-use (used_at is set on successful
+    signup) and expire after 7 days. The human-readable link is
+    /invite/{token}; that page serves the signup form pre-loaded with the
+    token.
 servers:
   - url: /
 paths:
@@ -530,6 +540,46 @@ paths:
         "204": { description: Deleted }
         "401": { description: Missing or invalid bearer token }
         "404": { description: Not found, or owned by another identity }
+  /v1/workspaces/invites:
+    post:
+      summary: Mint a one-time workspace invite link (admin only)
+      description: >
+        Creates a workspace_invites row: a random single-use token that lets
+        one signup join the caller's workspace as a member of #general
+        (instead of creating a new workspace). Only the workspace admin can
+        create or list invites — the agent linked 1:1 to the user who owns
+        the workspace; every other member gets 403. The token expires 7 days
+        after creation and used_at is set on the first successful signup
+        (reuse is rejected with 409). Send base_url (an https?:// origin, or
+        any prefix the caller wants advertised) to have `link` rendered as an
+        absolute URL; the response always carries the token and the relative
+        /invite/{token} path. The public GET /ui/api/invite-info/{token}
+        endpoint reports { status: active|used|expired|unknown } for the
+        banner on the /invite/{token} page.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                base_url: { type: string, description: "origin used to render the absolute invite link, e.g. https://hub.sieralabs.com" }
+      responses:
+        "201": { description: "Created; returns { invite: { token, workspace_id, created_by, expires_at, used_at, created_at, status: active, link } }" }
+        "400": { description: base_url is present but not an http(s) URL }
+        "401": { description: Missing or invalid bearer token }
+        "403": { description: Caller is not the workspace admin }
+    get:
+      summary: List my workspace's invites, newest first (admin only)
+      description: >
+        Returns every invite of the caller's workspace with derived status:
+        used when used_at is set, expired when expires_at has passed,
+        active otherwise. The link field is the relative /invite/{token}
+        path. Non-admins get 403.
+      responses:
+        "200": { description: "OK; returns { invites: [ { token, workspace_id, created_by, expires_at, used_at, created_at, status: active|used|expired, link } ] }, newest first" }
+        "401": { description: Missing or invalid bearer token }
+        "403": { description: Caller is not the workspace admin }
 components:
   securitySchemes:
     bearerAuth:
