@@ -1034,3 +1034,493 @@ async fn session_cookie_is_secure() {
     assert!(cookie.contains("Secure"), "logout cookie missing Secure: {cookie}");
     assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Lax"));
 }
+
+// --- GitHub integration: channels link repos and browse PRs ---
+
+/// Router wired with a MockGitHub transport, plus the shared mock handle
+/// so tests can script responses and assert on the calls made.
+fn github_app(name: &str) -> (RouterT, Arc<aghub::github::MockGitHub>) {
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let db = aghub::db::Db::open(&format!(
+        "/tmp/aghub-test-{}-{}-{}.db",
+        name,
+        n,
+        std::process::id()
+    ))
+    .expect("open test db");
+    db.migrate().expect("migrate");
+    let mut state = aghub::state::AppState::new(db, reqwest::Client::builder().build().unwrap());
+    let mock = Arc::new(aghub::github::MockGitHub::new());
+    state.github = mock.clone();
+    state.github_cache_ttl_secs = 1; // exercise the refresh path quickly
+    (aghub::api::build_router(state), mock)
+}
+
+/// alpha + beta in one channel; ghost is a registered outsider.
+async fn github_setup(router: &RouterT) -> (i64, String, i64, String, String) {
+    let (a1, t1) = register(router, "alpha", None).await;
+    let (a2, t2) = register(router, "beta", None).await;
+    let (_, tout) = register(router, "ghost", None).await;
+    let (status, v) = call(
+        router,
+        "POST",
+        "/v1/channels",
+        Some(&t1),
+        Some(json!({ "name": "gh-ops", "member_ids": [a1, a2] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    let chan = v["channel"]["id"].as_i64().unwrap();
+    (chan, t1, a1, t2, tout)
+}
+
+#[tokio::test]
+async fn github_link_list_unlink_and_visibility() {
+    let (router, mock) = github_app("gh-link");
+    mock.set_repo(
+        "acme",
+        "api",
+        json!({ "full_name": "acme/api", "default_branch": "develop" }),
+    );
+    let (chan, t1, a1, t2, tout) = github_setup(&router).await;
+    let repos_uri = format!("/v1/channels/{chan}/github/repos");
+
+    // Link: fetches the repo first, persists the default branch it returned.
+    let (status, v) = call(
+        &router,
+        "POST",
+        &repos_uri,
+        Some(&t1),
+        Some(json!({ "owner": "acme", "name": "api" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let repo_id = v["repo"]["id"].as_i64().unwrap();
+    assert_eq!(v["repo"]["owner"], "acme");
+    assert_eq!(v["repo"]["name"], "api");
+    assert_eq!(v["repo"]["default_branch"], "develop");
+    assert_eq!(v["repo"]["linked_by"], a1);
+
+    // Re-link by a plain member is now admin-gated.
+    let (status, v) = call(
+        &router,
+        "POST",
+        &repos_uri,
+        Some(&t2),
+        Some(json!({ "owner": "acme", "name": "api" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "members must not link: {v}");
+    assert_eq!(
+        v["error"]["message"], "only channel admins can manage GitHub repositories"
+    );
+
+    // Members see the links; an outsider is 403; unknown channel is 404.
+    let (status, v) = call(&router, "GET", &repos_uri, Some(&t2), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["repos"].as_array().unwrap().len(), 1);
+    let (status, _) = call(&router, "GET", &repos_uri, Some(&tout), None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "outsider must not list links");
+    let (status, v) = call(&router, "GET", "/v1/channels/999999/github/repos", Some(&t1), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(v["error"]["code"], "not_found");
+
+    // Unlink is admin-gated too: the member's attempt is denied, the
+    // admin's succeeds, a second unlink is 404.
+    let (status, _) = call(
+        &router,
+        "DELETE",
+        &format!("{repos_uri}/{repo_id}"),
+        Some(&t2),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "members must not unlink");
+    let (status, _) = call(
+        &router,
+        "DELETE",
+        &format!("{repos_uri}/{repo_id}"),
+        Some(&t1),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(
+        &router,
+        "DELETE",
+        &format!("{repos_uri}/{repo_id}"),
+        Some(&t1),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "second unlink by admin is 404");
+    let (status, v) = call(&router, "GET", &repos_uri, Some(&t1), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["repos"].as_array().unwrap().len(), 0, "repos after unlink");
+}
+
+#[tokio::test]
+async fn github_link_validates_slugs_and_upstream_errors() {
+    let (router, mock) = github_app("gh-valid");
+    let (chan, t1, _, _, _) = github_setup(&router).await;
+    let repos_uri = format!("/v1/channels/{chan}/github/repos");
+
+    // Malformed slugs are rejected before any GitHub call.
+    for bad in [
+        json!({ "owner": "", "name": "api" }),
+        json!({ "owner": "acme", "name": "../etc" }),
+        json!({ "owner": "-lead", "name": "api" }),
+        json!({ "owner": "acme", "name": "a b" }),
+    ] {
+        let (status, _) = call(&router, "POST", &repos_uri, Some(&t1), Some(bad.clone())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "bad slug must 400: {bad}");
+    }
+    // Unknown fields are rejected too — by axum's Json extractor (422).
+    let (status, _) = call(
+        &router,
+        "POST",
+        &repos_uri,
+        Some(&t1),
+        Some(json!({ "owner": "acme", "name": "api", "extra": 1 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "unknown field must be rejected");
+    assert!(mock.calls().is_empty(), "invalid slugs must not reach GitHub");
+
+    // A repo GitHub cannot see (404) cannot be linked.
+    mock.set_repo_error("ghost", "repo", 404, "Not Found");
+    let (status, v) = call(
+        &router,
+        "POST",
+        &repos_uri,
+        Some(&t1),
+        Some(json!({ "owner": "ghost", "name": "repo" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{v}");
+    assert_eq!(v["error"]["code"], "github_not_found");
+
+    // Other upstream failures are a 502 with context, not a crash.
+    mock.set_repo_error("broken", "repo", 500, "kaboom");
+    let (status, v) = call(
+        &router,
+        "POST",
+        &repos_uri,
+        Some(&t1),
+        Some(json!({ "owner": "broken", "name": "repo" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{v}");
+    assert_eq!(v["error"]["code"], "github_error");
+    assert!(v["error"]["message"].as_str().unwrap().contains("500"));
+}
+
+#[tokio::test]
+async fn github_repo_cap_per_channel() {
+    let (router, mock) = github_app("gh-cap");
+    let (chan, t1, _, _, _) = github_setup(&router).await;
+    let repos_uri = format!("/v1/channels/{chan}/github/repos");
+    for i in 0..10 {
+        let (owner, name) = (format!("acme{i}"), "repo");
+        mock.set_repo(&owner, name, json!({ "default_branch": "main" }));
+        let (status, v) = call(
+            &router,
+            "POST",
+            &repos_uri,
+            Some(&t1),
+            Some(json!({ "owner": owner, "name": name })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "link {i} failed: {v}");
+    }
+    mock.set_repo("acme11", "repo", json!({ "default_branch": "main" }));
+    let (status, v) = call(
+        &router,
+        "POST",
+        &repos_uri,
+        Some(&t1),
+        Some(json!({ "owner": "acme11", "name": "repo" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(v["error"]["code"], "github_repo_cap_reached");
+
+    // Re-linking an existing repo stays under the cap.
+    let (status, _) = call(
+        &router,
+        "POST",
+        &repos_uri,
+        Some(&t1),
+        Some(json!({ "owner": "acme0", "name": "repo" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn github_pulls_cache_filters_and_ttl_refresh() {
+    let (router, mock) = github_app("gh-pulls");
+    mock.set_repo("acme", "api", json!({ "default_branch": "main" }));
+    let (chan, t1, _, t2, tout) = github_setup(&router).await;
+    let (_, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{chan}/github/repos"),
+        Some(&t1),
+        Some(json!({ "owner": "acme", "name": "api" })),
+    )
+    .await;
+    let repo_id = v["repo"]["id"].as_i64().unwrap();
+    let base = format!("/v1/channels/{chan}/github/repos/{repo_id}/pulls");
+
+    mock.set_pulls(
+        "acme",
+        "api",
+        json!([
+            { "number": 2, "title": "Open draft", "state": "open", "draft": true,
+              "user": { "login": "octocat" }, "html_url": "https://github.com/acme/api/pull/2" },
+            { "number": 1, "title": "Open ready", "state": "open", "draft": false,
+              "user": { "login": "hubot" }, "html_url": "https://github.com/acme/api/pull/1" },
+            { "number": 7, "title": "Merged", "state": "closed", "draft": false,
+              "user": { "login": "octocat" }, "html_url": "https://github.com/acme/api/pull/7" }
+        ]),
+    );
+
+    // First list fetches from the transport and caches.
+    let (status, v) = call(&router, "GET", &format!("{base}?state=open"), Some(&t1), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let pulls = v["pulls"].as_array().unwrap();
+    assert_eq!(pulls.len(), 2, "open only: {v}");
+    assert_eq!(pulls[0]["number"], 2, "ordered by number desc");
+    assert_eq!(pulls[0]["draft"], true);
+    assert_eq!(pulls[0]["author"], "octocat");
+
+    let (status, v) = call(&router, "GET", &format!("{base}?state=closed"), Some(&t2), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["pulls"].as_array().unwrap().len(), 1);
+    assert_eq!(v["pulls"][0]["number"], 7);
+
+    let pull_calls = mock.calls().iter().filter(|c| c.contains("/pulls")).count();
+    assert_eq!(pull_calls, 1, "one upstream fetch serves three cache reads");
+
+    // Within the TTL a changed upstream is not re-fetched.
+    mock.set_pulls(
+        "acme",
+        "api",
+        json!([{ "number": 9, "title": "Fresh", "state": "open", "draft": false,
+                 "user": { "login": "new" }, "html_url": "https://github.com/acme/api/pull/9" }]),
+    );
+    let (_, v) = call(&router, "GET", &base, Some(&t1), None).await;
+    assert_eq!(v["pulls"].as_array().unwrap().len(), 3, "stale cache served within TTL");
+
+    // After the TTL the list refreshes and the new upstream wins.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let (status, v) = call(&router, "GET", &base, Some(&t1), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let pulls = v["pulls"].as_array().unwrap();
+    assert_eq!(pulls.len(), 1, "refreshed after TTL: {v}");
+    assert_eq!(pulls[0]["number"], 9);
+    let pull_calls = mock.calls().iter().filter(|c| c.contains("/pulls")).count();
+    assert_eq!(pull_calls, 2, "exactly one refresh after the TTL");
+
+    // Validation and access control.
+    let (status, _) = call(&router, "GET", &format!("{base}?state=weird"), Some(&t1), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = call(&router, "GET", &format!("{base}?limit=100000"), Some(&t1), None).await;
+    assert_eq!(status, StatusCode::OK, "limit is clamped, not rejected");
+    let (status, _) = call(&router, "GET", &base, Some(&tout), None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "outsider must not list pulls");
+    let (status, _) = call(
+        &router,
+        "GET",
+        &format!("/v1/channels/{chan}/github/repos/999999/pulls"),
+        Some(&t1),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "link of another channel is 404");
+
+    // Unlinking drops the cache with it.
+    let (status, _) = call(
+        &router,
+        "DELETE",
+        &format!("/v1/channels/{chan}/github/repos/{repo_id}"),
+        Some(&t1),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn github_create_pull() {
+    let (router, mock) = github_app("gh-create");
+    mock.set_repo("acme", "api", json!({ "default_branch": "main" }));
+    let (chan, t1, _, t2, tout) = github_setup(&router).await;
+    let (_, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{chan}/github/repos"),
+        Some(&t1),
+        Some(json!({ "owner": "acme", "name": "api" })),
+    )
+    .await;
+    let repo_id = v["repo"]["id"].as_i64().unwrap();
+    let pulls_uri = format!("/v1/channels/{chan}/github/repos/{repo_id}/pulls");
+    let body = json!({ "head": "feature", "base": "main", "title": "Add feature", "body": "desc" });
+
+    // Invalid bodies are rejected locally, without a GitHub call.
+    for bad in [
+        json!({ "head": "", "base": "main", "title": "T" }),
+        json!({ "head": "feature", "base": "", "title": "T" }),
+        json!({ "head": "feature", "base": "main", "title": "" }),
+        json!({ "head": "feature", "base": "main", "title": "T", "extra": 1 }),
+    ] {
+        let (status, _) = call(&router, "POST", &pulls_uri, Some(&t1), Some(bad.clone())).await;
+        assert!(
+            status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid create must be rejected: {bad}"
+        );
+    }
+    assert!(
+        !mock.calls().iter().any(|c| c.ends_with("/pulls")),
+        "invalid bodies must not reach GitHub"
+    );
+
+    // Only channel admins may open PRs: member and outsider are denied.
+    let (status, _) = call(&router, "POST", &pulls_uri, Some(&t2), Some(body.clone())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "plain member must not create PRs");
+    let (status, _) = call(&router, "POST", &pulls_uri, Some(&tout), Some(body.clone())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "outsider must not create PRs");
+
+    // Admin creates: the transport is called and the returned PR is answered.
+    mock.push_post_response(
+        "/repos/acme/api/pulls",
+        Ok(json!({
+            "number": 12, "title": "Add feature", "state": "open", "draft": false,
+            "html_url": "https://github.com/acme/api/pull/12"
+        })),
+    );
+    let (status, v) = call(&router, "POST", &pulls_uri, Some(&t1), Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    assert_eq!(v["pull"]["number"], 12);
+    assert_eq!(v["pull"]["url"], "https://github.com/acme/api/pull/12");
+    assert_eq!(v["pull"]["state"], "open");
+
+    // The created PR is cached; the next list shows it without a refresh.
+    let (status, v) = call(&router, "GET", &format!("{pulls_uri}?state=open"), Some(&t1), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let pulls = v["pulls"].as_array().unwrap();
+    assert_eq!(pulls.len(), 1, "created PR must be cached: {v}");
+    assert_eq!(pulls[0]["number"], 12);
+    assert_eq!(pulls[0]["author"], "alpha");
+
+    // An upstream validation failure (422, e.g. branch missing) is passed
+    // through as a 400 with GitHub's message; server-side failures stay 502.
+    mock.push_post_response(
+        "/repos/acme/api/pulls",
+        Err(aghub::github::GitHubApiError {
+            status: Some(422),
+            message: "Validation Failed: A pull request already exists".into(),
+        }),
+    );
+    let (status, v) = call(
+        &router,
+        "POST",
+        &pulls_uri,
+        Some(&t1),
+        Some(json!({ "head": "feature", "base": "main", "title": "Dup" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(v["error"]["code"], "github_rejected");
+    assert!(v["error"]["message"].as_str().unwrap().contains("already exists"));
+    mock.push_post_response(
+        "/repos/acme/api/pulls",
+        Err(aghub::github::GitHubApiError { status: Some(500), message: "kaboom".into() }),
+    );
+    let (status, v) = call(
+        &router,
+        "POST",
+        &pulls_uri,
+        Some(&t1),
+        Some(json!({ "head": "feature", "base": "main", "title": "Boom" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{v}");
+    assert_eq!(v["error"]["code"], "github_error");
+
+    // Unknown repo link: 404.
+    let (status, _) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{chan}/github/repos/999999/pulls"),
+        Some(&t1),
+        Some(json!({ "head": "f", "base": "main", "title": "T" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn github_unconfigured_returns_503() {
+    // Default AppState ships the disabled transport: linking and listing 503.
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let db = aghub::db::Db::open(&format!(
+        "/tmp/aghub-test-gh-noop-{}-{}.db",
+        n,
+        std::process::id()
+    ))
+    .unwrap();
+    db.migrate().unwrap();
+    let mut state = aghub::state::AppState::new(db, reqwest::Client::builder().build().unwrap());
+    // Force the disabled transport: the ambient environment may carry a
+    // GITHUB_TOKEN, and this test must stay offline either way.
+    state.github = Arc::new(aghub::github::NoopGitHub);
+    let router = aghub::api::build_router(state);
+    let (a1, t1) = register(&router, "alpha", None).await;
+    let (status, v) = call(
+        &router,
+        "POST",
+        "/v1/channels",
+        Some(&t1),
+        Some(json!({ "name": "c", "member_ids": [a1] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let chan = v["channel"]["id"].as_i64().unwrap();
+
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{chan}/github/repos"),
+        Some(&t1),
+        Some(json!({ "owner": "acme", "name": "api" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    assert_eq!(v["error"]["code"], "github_unavailable");
+
+    let (status, v) = call(
+        &router,
+        "GET",
+        &format!("/v1/channels/{chan}/github/repos/1/pulls"),
+        Some(&t1),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(v["error"]["code"], "github_unavailable");
+
+    // Creating a PR is unavailable too.
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{chan}/github/repos/1/pulls"),
+        Some(&t1),
+        Some(json!({ "head": "feature", "base": "main", "title": "T" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    assert_eq!(v["error"]["code"], "github_unavailable");
+}

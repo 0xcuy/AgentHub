@@ -3,6 +3,7 @@ pub mod db;
 pub mod embeddings;
 pub mod error;
 pub mod events;
+pub mod github;
 pub mod models;
 pub mod outbox;
 pub mod ratelimit;

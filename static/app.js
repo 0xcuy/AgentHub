@@ -3,7 +3,7 @@
   const state = {
     me: null,            // { email, agent: { id, handle, name, ..., token } }
     token: '',
-    view: null,          // { kind: 'channel'|'dm'|'inbox'|'mail'|'agents'|'runs', id?, name? }
+    view: null,          // { kind: 'channel'|'dm'|'inbox'|'mail'|'agents'|'runs'|'github', id?, name? }
     channels: [],
     agents: [],
     dms: new Map(),      // agentId -> unread count (session-local)
@@ -298,6 +298,189 @@
     }
   }
 
+  /* ---------- github ---------- */
+  async function showGithub() {
+    state.view = { kind: 'github' };
+    paneTitle.textContent = 'GitHub';
+    paneSub.textContent = 'Linked repositories and pull requests';
+    setComposer(false);
+    renderNav();
+    if (state.channels.length === 0) {
+      stream.innerHTML = `<div class="empty"><b>No channels yet</b>Create a channel first — repositories are linked to channels.</div>`;
+      return;
+    }
+    const chOptions = state.channels.map((c) => `<option value="${c.id}"># ${esc(c.name)}</option>`).join('');
+    stream.innerHTML = `
+      <div style="padding:0 var(--sp-4);max-width:720px;margin:0 auto;width:100%">
+        <form id="gh-link" style="display:flex;flex-wrap:wrap;gap:var(--sp-3);align-items:end;margin:var(--sp-4) 0">
+          <div class="field" style="flex:2;min-width:150px"><label for="gh-channel">Channel</label><select id="gh-channel">${chOptions}</select></div>
+          <div class="field" style="flex:1;min-width:110px"><label for="gh-owner">Owner</label><input id="gh-owner" required placeholder="acme" autocomplete="off"></div>
+          <div class="field" style="flex:1;min-width:110px"><label for="gh-name">Repository</label><input id="gh-name" required placeholder="api" autocomplete="off"></div>
+          <button class="btn btn-primary" type="submit">Link repo</button>
+        </form>
+        <p class="faint" id="gh-msg" style="min-height:1.2em;margin:0 0 var(--sp-4)" role="alert"></p>
+        <div id="gh-repos"><div class="empty">Loading…</div></div>
+      </div>`;
+    $('#gh-link').addEventListener('submit', linkRepo);
+    await loadGithubRepos();
+  }
+
+  function ghAgentHandle(id) {
+    return state.agents.find((a) => a.id === id)?.handle ?? `#${id}`;
+  }
+
+  async function loadGithubRepos() {
+    const box = $('#gh-repos');
+    try {
+      const perChannel = await Promise.all(state.channels.map(async (c) => {
+        try {
+          const v = await api(`/v1/channels/${c.id}/github/repos`);
+          return { channel: c, repos: v.repos ?? [], error: null };
+        } catch (e) {
+          return { channel: c, repos: [], error: e.message };
+        }
+      }));
+      if (perChannel.every((p) => p.repos.length === 0 && !p.error)) {
+        box.innerHTML = `<div class="empty"><b>No repositories linked</b>Link one above — channel members share its repos and pull requests.</div>`;
+        return;
+      }
+      box.innerHTML = perChannel.map(({ channel, repos, error }) => `
+        <section style="margin-bottom:var(--sp-5)">
+          <h3 style="margin-bottom:var(--sp-2)"># ${esc(channel.name)}</h3>
+          ${error ? `<div class="empty"><b>Couldn't load</b>${esc(error)}</div>` : ''}
+          ${repos.map((r) => `
+          <div class="row">
+            <div class="grow">
+              <b class="mono">${esc(r.owner)}/${esc(r.name)}</b>
+              <span class="badge run">${esc(r.default_branch)}</span>
+              <p>linked by @${esc(ghAgentHandle(r.linked_by))} · ${esc(when(r.updated_at))}</p>
+              <div class="gh-pulls" data-pulls="${r.id}" hidden></div>
+            </div>
+            <button class="btn" data-prs="${r.id}" data-cid="${channel.id}">Pull requests</button>
+            <button class="btn" data-unlink="${r.id}" data-cid="${channel.id}">Remove</button>
+          </div>`).join('')}
+          ${repos.length ? `
+          <details style="margin-top:var(--sp-2)">
+            <summary>Open pull request</summary>
+            <form class="gh-pr-form" data-cid="${channel.id}" style="display:grid;gap:var(--sp-2);margin-top:var(--sp-2);max-width:440px">
+              <div class="field"><label for="gh-pr-repo-${channel.id}">Repository</label>
+                <select id="gh-pr-repo-${channel.id}" class="gh-pr-repo">${repos.map((r) => `<option value="${r.id}">${esc(r.owner)}/${esc(r.name)}</option>`).join('')}</select></div>
+              <div class="field"><label for="gh-pr-head-${channel.id}">Head branch</label><input id="gh-pr-head-${channel.id}" class="gh-pr-head" required placeholder="feature/my-change" autocomplete="off"></div>
+              <div class="field"><label for="gh-pr-base-${channel.id}">Base branch</label><input id="gh-pr-base-${channel.id}" class="gh-pr-base" required placeholder="main" autocomplete="off"></div>
+              <div class="field"><label for="gh-pr-title-${channel.id}">Title</label><input id="gh-pr-title-${channel.id}" class="gh-pr-title" required placeholder="Add my change" autocomplete="off"></div>
+              <div class="field"><label for="gh-pr-body-${channel.id}">Description</label><textarea id="gh-pr-body-${channel.id}" class="gh-pr-body" rows="2" placeholder="What does this change?"></textarea></div>
+              <div><button class="btn btn-primary" type="submit">Open PR</button>
+                <span class="faint gh-pr-msg" role="alert"></span></div>
+            </form>
+          </details>` : ''}
+        </section>`).join('');
+      box.querySelectorAll('[data-prs]').forEach((b) =>
+        b.addEventListener('click', () => togglePulls(b)));
+      box.querySelectorAll('[data-unlink]').forEach((b) =>
+        b.addEventListener('click', () => unlinkRepo(b)));
+      box.querySelectorAll('.gh-pr-form').forEach((f) =>
+        f.addEventListener('submit', createPull));
+    } catch (e) {
+      box.innerHTML = `<div class="empty"><b>Couldn't load repositories</b>${esc(e.message)}</div>`;
+    }
+  }
+
+  async function renderPulls(container, cid, rid, stateFilter) {
+    container.innerHTML = '<p class="faint">Loading…</p>';
+    try {
+      const v = await api(`/v1/channels/${cid}/github/repos/${rid}/pulls?state=${stateFilter}&limit=50`);
+      const pulls = v.pulls ?? [];
+      container.innerHTML = `
+        <div style="display:flex;gap:var(--sp-2);margin:var(--sp-2) 0">
+          ${['open', 'closed', 'all'].map((s) =>
+            `<button class="btn ${s === stateFilter ? 'btn-primary' : ''}" data-gh-state="${s}">${s}</button>`).join('')}
+        </div>
+        ${pulls.length === 0
+          ? `<p class="faint">No ${esc(stateFilter)} pull requests.</p>`
+          : pulls.map((p) => `
+          <div class="row">
+            <div class="grow">
+              <b><a class="mono" href="${esc(p.url)}" target="_blank" rel="noopener">#${p.number} ${esc(p.title)}</a></b>
+              ${p.draft ? '<span class="badge run">draft</span>' : ''}
+              <span class="badge ${p.state === 'open' ? 'ok' : ''}"><span class="dot"></span>${esc(p.state)}</span>
+              <p>${p.author ? `@${esc(p.author)}` : 'unknown author'} · fetched ${esc(when(p.fetched_at))}</p>
+            </div>
+          </div>`).join('')}`;
+      container.querySelectorAll('[data-gh-state]').forEach((b) =>
+        b.addEventListener('click', () => renderPulls(container, cid, rid, b.dataset.ghState)));
+    } catch (e) {
+      container.innerHTML = `<div class="empty" role="alert"><b>Couldn't load pull requests</b>${esc(e.message)}</div>`;
+    }
+  }
+
+  async function togglePulls(btn) {
+    const container = document.querySelector(`[data-pulls="${btn.dataset.prs}"]`);
+    if (!container.hidden) {
+      container.hidden = true;
+      btn.textContent = 'Pull requests';
+      return;
+    }
+    container.hidden = false;
+    btn.textContent = 'Hide pull requests';
+    await renderPulls(container, +btn.dataset.cid, +btn.dataset.prs, 'open');
+  }
+
+  async function linkRepo(e) {
+    e.preventDefault();
+    const msg = $('#gh-msg');
+    msg.textContent = '';
+    try {
+      await api(`/v1/channels/${$('#gh-channel').value}/github/repos`, {
+        method: 'POST',
+        body: JSON.stringify({
+          owner: $('#gh-owner').value.trim(),
+          name: $('#gh-name').value.trim(),
+        }),
+      });
+      $('#gh-owner').value = '';
+      $('#gh-name').value = '';
+      await loadGithubRepos();
+    } catch (err) {
+      msg.textContent = err.message;
+    }
+  }
+
+  async function unlinkRepo(btn) {
+    try {
+      await api(`/v1/channels/${btn.dataset.cid}/github/repos/${btn.dataset.unlink}`, {
+        method: 'DELETE',
+      });
+      await loadGithubRepos();
+    } catch (err) {
+      $('#gh-msg').textContent = err.message;
+    }
+  }
+
+  async function createPull(e) {
+    e.preventDefault();
+    const f = e.target;
+    const msg = f.querySelector('.gh-pr-msg');
+    msg.textContent = '';
+    try {
+      const v = await api(
+        `/v1/channels/${f.dataset.cid}/github/repos/${f.querySelector('.gh-pr-repo').value}/pulls`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            head: f.querySelector('.gh-pr-head').value.trim(),
+            base: f.querySelector('.gh-pr-base').value.trim(),
+            title: f.querySelector('.gh-pr-title').value.trim(),
+            body: f.querySelector('.gh-pr-body').value || undefined,
+          }),
+        },
+      );
+      f.querySelectorAll('input, textarea').forEach((el) => (el.value = ''));
+      msg.textContent = `Pull request #${v.pull.number} opened`;
+    } catch (err) {
+      msg.textContent = err.message;
+    }
+  }
+
   /* ---------- composer ---------- */
   $('#composer-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -431,7 +614,7 @@
 
     document.querySelectorAll('[data-view]').forEach((b) =>
       b.addEventListener('click', () => {
-        ({ inbox: showInbox, mail: showMail, agents: showAgents, runs: showRuns })[b.dataset.view]();
+        ({ inbox: showInbox, mail: showMail, agents: showAgents, runs: showRuns, github: showGithub })[b.dataset.view]();
       }));
 
     initialLoad();

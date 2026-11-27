@@ -219,3 +219,56 @@ pub fn valid_handle(h: &str) -> bool {
     (2..=32).contains(&h.len())
         && h.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
+
+/// A channel's linked GitHub repository, as stored in `github_repos`.
+#[derive(Clone, Debug, Serialize)]
+pub struct GitHubRepo {
+    pub id: i64,
+    pub channel_id: i64,
+    pub owner: String,
+    pub name: String,
+    pub default_branch: String,
+    pub linked_by: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One cached pull request from `github_pulls`.
+#[derive(Clone, Debug, Serialize)]
+pub struct GitHubPull {
+    pub number: i64,
+    pub title: String,
+    pub state: String,
+    pub draft: bool,
+    pub author: Option<String>,
+    pub url: String,
+    pub fetched_at: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkGitHubRepo {
+    pub owner: String,
+    pub name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreatePullRequest {
+    pub head: String,
+    pub base: String,
+    pub title: String,
+    pub body: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct PullsQuery {
+    pub state: Option<String>,
+    pub limit: Option<i64>,
+}
+
+pub const PULL_STATES: &[&str] = &["open", "closed", "all"];
+
+pub fn valid_pull_state(s: &str) -> bool {
+    PULL_STATES.contains(&s)
+}
