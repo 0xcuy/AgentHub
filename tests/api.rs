@@ -3045,3 +3045,145 @@ async fn login_throttle_window_rolls_over_so_lockout_is_temporary() {
         "a fresh window starts below the limit"
     );
 }
+
+#[tokio::test]
+async fn reactions_add_remove_and_counts() {
+    let router = test_app("reactions");
+    let (a1, t1) = register(&router, "alpha", None).await;
+    let (a2, t2) = add_agent(&router, &t1, "beta", None).await;
+
+    let (status, v) = call(
+        &router,
+        "POST",
+        "/v1/channels",
+        Some(&t1),
+        Some(json!({ "name": "eng", "member_ids": [a1, a2] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "channel create failed: {v}");
+    let chan = v["channel"]["id"].as_i64().unwrap();
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{chan}/messages"),
+        Some(&t1),
+        Some(json!({ "body": "deploy is live" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let msg = v["message"]["id"].as_i64().unwrap();
+    let react = format!("/v1/messages/{msg}/reactions");
+
+    // Add: 201 the first time, 200 (idempotent) on a repeat.
+    let (status, _) = call(&router, "POST", &react, Some(&t2), Some(json!({ "emoji": "ok" }))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = call(&router, "POST", &react, Some(&t2), Some(json!({ "emoji": "ok" }))).await;
+    assert_eq!(status, StatusCode::OK, "re-adding the same reaction is a no-op");
+    let (status, _) = call(&router, "POST", &react, Some(&t1), Some(json!({ "emoji": "ok" }))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = call(&router, "POST", &react, Some(&t1), Some(json!({ "emoji": "seen" }))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = call(&router, "POST", &react, Some(&t2), Some(json!({ "emoji": "banana" }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "unknown reaction names are rejected");
+
+    // Aggregate counts: 2x ok, 1x seen; `mine` is per viewer.
+    let (status, v) = call(&router, "GET", &format!("/v1/channels/{chan}/messages"), Some(&t2), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let reactions = v["messages"][0]["reactions"].as_array().unwrap();
+    let ok = reactions.iter().find(|r| r["emoji"] == "ok").unwrap();
+    assert_eq!(ok["count"], 2);
+    assert_eq!(ok["mine"], true);
+    let seen = reactions.iter().find(|r| r["emoji"] == "seen").unwrap();
+    assert_eq!(seen["count"], 1);
+    assert_eq!(seen["mine"], false, "alpha's reaction is not beta's");
+    assert!(
+        v["messages"][0].get("read_by").is_none(),
+        "channel messages carry no per-recipient read state"
+    );
+
+    // A workspace member outside the channel cannot react.
+    let (_a3, t3) = add_agent(&router, &t1, "gamma", None).await;
+    let (status, _) = call(&router, "POST", &react, Some(&t3), Some(json!({ "emoji": "ok" }))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // Another workspace's agent cannot even see the message.
+    let (_a4, t4) = register(&router, "delta", None).await;
+    let (status, _) = call(&router, "POST", &react, Some(&t4), Some(json!({ "emoji": "ok" }))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Remove: 204 once, 404 on a repeat.
+    let (status, _) = call(
+        &router,
+        "DELETE",
+        &format!("{react}/ok"),
+        Some(&t2),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(&router, "DELETE", &format!("{react}/ok"), Some(&t2), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (_, v) = call(&router, "GET", &format!("/v1/channels/{chan}/messages"), Some(&t2), None).await;
+    let ok = v["messages"][0]["reactions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["emoji"] == "ok")
+        .unwrap()
+        .clone();
+    assert_eq!(ok["count"], 1);
+    assert_eq!(ok["mine"], false);
+}
+
+#[tokio::test]
+async fn dm_read_receipts_and_reactions_visible_to_sender() {
+    let router = test_app("readby");
+    let (a1, t1) = register(&router, "alpha", None).await;
+    let (a2, t2) = add_agent(&router, &t1, "beta", None).await;
+
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/dms/{a2}/messages"),
+        Some(&t1),
+        Some(json!({ "body": "laporan sudah dikirim" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let msg = v["message"]["id"].as_i64().unwrap();
+
+    // Before the recipient reads it, the sender sees no read_by entries.
+    let (status, v) = call(&router, "GET", &format!("/v1/dms/{a2}/messages"), Some(&t1), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["messages"][0]["read_by"].as_array().unwrap().len(), 0);
+    assert_eq!(v["messages"][0]["reactions"].as_array().unwrap().len(), 0);
+
+    // The recipient marks the inbox item read; that is the existing receipt.
+    let (status, _) = call(
+        &router,
+        "POST",
+        "/v1/inbox/read",
+        Some(&t2),
+        Some(json!({ "message_ids": [msg] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, v) = call(&router, "GET", &format!("/v1/dms/{a2}/messages"), Some(&t1), None).await;
+    let read_by = v["messages"][0]["read_by"].as_array().unwrap();
+    assert_eq!(read_by.len(), 1);
+    assert_eq!(read_by[0]["handle"], "beta");
+    assert!(!read_by[0]["read_at"].as_str().unwrap().is_empty());
+
+    // The recipient reacts; both sides get the aggregate, `mine` per viewer.
+    let react = format!("/v1/messages/{msg}/reactions");
+    let (status, _) = call(&router, "POST", &react, Some(&t2), Some(json!({ "emoji": "done" }))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, v) = call(&router, "GET", &format!("/v1/dms/{a2}/messages"), Some(&t1), None).await;
+    let done = &v["messages"][0]["reactions"][0];
+    assert_eq!(done["emoji"], "done");
+    assert_eq!(done["count"], 1);
+    assert_eq!(done["mine"], false, "the sender did not react");
+    let (_, v) = call(&router, "GET", &format!("/v1/dms/{a1}/messages"), Some(&t2), None).await;
+    assert_eq!(v["messages"][0]["reactions"][0]["mine"], true);
+}

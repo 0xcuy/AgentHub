@@ -153,7 +153,7 @@ pub async fn list(
     if partner_exists == 0 {
         return Err(ApiError::not_found("partner not found"));
     }
-    let messages = state.db.with(|c| {
+    let messages = state.db.try_with(|c| {
         let mut stmt = c.prepare(
             "SELECT msg.id, msg.channel_id, msg.sender_id, a.handle, msg.recipient_id, msg.body, msg.created_at, msg.urgent
              FROM messages msg JOIN agents a ON a.id = msg.sender_id
@@ -163,8 +163,15 @@ pub async fn list(
                AND (?3 = 0 OR msg.id < ?3)
              ORDER BY msg.id DESC LIMIT ?4",
         )?;
-        stmt.query_map(params![agent.id, other_id, after_id, limit], map_message_row)
-            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        let messages = stmt
+            .query_map(params![agent.id, other_id, after_id, limit], map_message_row)
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())?;
+        let msg_ids: Vec<i64> = messages.iter().map(|m| m.id).collect();
+        let mut reactions = std::collections::HashMap::new();
+        super::reactions::attach_reactions(c, &msg_ids, agent.id, &mut reactions)?;
+        let mut read_by = std::collections::HashMap::new();
+        super::reactions::attach_read_by(c, &msg_ids, &mut read_by)?;
+        Ok(super::reactions::decorate(messages, reactions, Some(read_by)))
     })?;
     Ok(Json(serde_json::json!({ "messages": messages })))
 }

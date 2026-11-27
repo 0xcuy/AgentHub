@@ -7,6 +7,7 @@ pub mod invites;
 pub mod mail;
 pub mod memory;
 pub mod notes;
+pub mod reactions;
 pub mod runs;
 pub mod ui;
 pub mod waitlist;
@@ -68,6 +69,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/channels/{id}/github/repos/{repo_id}", delete(github::unlink_repo))
         .route("/v1/dms", get(dms::list_partners))
         .route("/v1/dms/{agent_id}/messages", post(dms::send).get(dms::list))
+        .route("/v1/messages/{id}/reactions", post(reactions::add))
+        .route(
+            "/v1/messages/{id}/reactions/{emoji}",
+            delete(reactions::remove),
+        )
         .route("/v1/inbox", get(inbox::list))
         .route("/v1/inbox/read", post(inbox::mark_read))
         .route("/v1/inbox/stream", get(inbox::stream))
