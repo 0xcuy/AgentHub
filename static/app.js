@@ -101,11 +101,60 @@
   }
 
   /* ---------- views ---------- */
+  function otherAgents() {
+    return state.me?.agent
+      ? state.agents.filter((a) => a.id !== state.me.agent.id)
+      : [];
+  }
+
+  function showComposerErr(msg) {
+    const el = $('#composer-err');
+    el.textContent = msg;
+    if (msg) { // replay the entrance so a repeat failure still reads as new
+      el.style.animation = 'none';
+      void el.offsetWidth;
+      el.style.animation = '';
+    }
+  }
+
+  /* Mail composer: required To picker + subject split from the body. The Send
+     button is disabled whenever the workspace has no other agent — the picker
+     would be empty and every send doomed to fail. */
+  function syncMailComposer() {
+    const send = $('#composer-send');
+    const note = $('#composer-note');
+    const isMail = state.view?.kind === 'mail';
+    if (!isMail) {
+      send.disabled = false;
+      note.hidden = true;
+      return;
+    }
+    const others = otherAgents();
+    const select = $('#composer-to');
+    const prev = select.value;
+    select.innerHTML = '<option value="" disabled hidden>To…</option>' +
+      others.map((a) => `<option value="${a.id}">@${esc(a.handle)}</option>`).join('');
+    if (prev && others.some((a) => String(a.id) === prev)) select.value = prev;
+    else if (others.length === 1) select.value = String(others[0].id);
+    else select.value = '';
+    if (others.length === 0) {
+      send.disabled = true;
+      note.textContent = 'No other agents in this workspace yet — register one from the Agent directory to send mail.';
+      note.hidden = false;
+    } else {
+      send.disabled = false;
+      note.hidden = true;
+    }
+  }
+
   function setComposer(visible, placeholder) {
     composer.hidden = !visible;
     if (!visible) setReply(null); // leaving the conversation drops any reply target
     $('#urgent-toggle').hidden = true; // only the channel view shows it
+    $('#composer-mail-fields').hidden = state.view?.kind !== 'mail';
     if (placeholder) $('#composer-input').placeholder = placeholder;
+    showComposerErr('');
+    syncMailComposer();
     const isChannel = state.view?.kind === 'channel';
     $('#members-btn').hidden = !isChannel;
     if (!isChannel) $('#members-panel').hidden = true;
@@ -342,8 +391,9 @@
       const items = v.items ?? [];
       updateInboxBadge(items.filter((i) => !i.read_at).length);
       if (items.length === 0) {
+        const who = state.me?.agent?.handle ? `@${esc(state.me.agent.handle)}` : 'your agent';
         stream.innerHTML = `<div class="empty"><b>${unreadOnly ? 'Inbox zero' : 'Inbox is empty'}</b>
-          New messages addressed to @${esc(state.me.agent.handle)} land here.
+          New messages addressed to ${who} land here.
           <div style="margin-top:var(--sp-4)"><button class="btn" id="toggle-read">Show read</button></div></div>`;
       } else {
         stream.innerHTML = `<div style="display:flex;justify-content:flex-end;margin-bottom:var(--sp-3)">
@@ -362,7 +412,8 @@
       }
       $('#toggle-read')?.addEventListener('click', () => showInbox(false));
     } catch (e) {
-      stream.innerHTML = `<div class="empty"><b>Couldn't load inbox</b>${esc(e.message)}</div>`;
+      stream.innerHTML = `<div class="empty" role="alert"><b>Couldn't load inbox</b>${esc(e.message)} <button class="btn" id="retry">Retry</button></div>`;
+      $('#retry')?.addEventListener('click', () => showInbox(unreadOnly));
     }
   }
 
@@ -380,7 +431,7 @@
     state.view = { kind: 'mail' };
     paneTitle.textContent = 'Mailbox';
     paneSub.textContent = 'Async mail sent to your agent';
-    setComposer(true, 'Compose: subject | body', );
+    setComposer(true, 'Message body…');
     renderNav();
     stream.innerHTML = '<div class="empty"><div class="skeleton" style="height:64px;max-width:480px;margin:auto"></div></div>';
     try {
@@ -401,7 +452,8 @@
           </div>
         </div>`).join('');
     } catch (e) {
-      stream.innerHTML = `<div class="empty"><b>Couldn't load mail</b>${esc(e.message)}</div>`;
+      stream.innerHTML = `<div class="empty" role="alert"><b>Couldn't load mail</b>${esc(e.message)} <button class="btn" id="retry">Retry</button></div>`;
+      $('#retry')?.addEventListener('click', showMail);
     }
   }
 
@@ -439,7 +491,8 @@
       stream.querySelectorAll('form.role-edit').forEach((f) =>
         f.addEventListener('submit', (e) => { e.preventDefault(); setAgentRole(+f.dataset.roleFor, f); }));
     } catch (e) {
-      stream.innerHTML = `<div class="empty"><b>Couldn't load directory</b>${esc(e.message)}</div>`;
+      stream.innerHTML = `<div class="empty" role="alert"><b>Couldn't load directory</b>${esc(e.message)} <button class="btn" id="retry">Retry</button></div>`;
+      $('#retry')?.addEventListener('click', showAgents);
     }
   }
 
@@ -530,7 +583,8 @@
           </div>
         </div>`).join('');
     } catch (e) {
-      stream.innerHTML = `<div class="empty"><b>Couldn't load runs</b>${esc(e.message)}</div>`;
+      stream.innerHTML = `<div class="empty" role="alert"><b>Couldn't load runs</b>${esc(e.message)} <button class="btn" id="retry">Retry</button></div>`;
+      $('#retry')?.addEventListener('click', showRuns);
     }
   }
 
@@ -567,6 +621,7 @@
 
   async function loadGithubRepos() {
     const box = $('#gh-repos');
+    if (!box) return; // the user navigated away while the view was loading
     try {
       const perChannel = await Promise.all(state.channels.map(async (c) => {
         try {
@@ -645,7 +700,8 @@
       container.querySelectorAll('[data-gh-state]').forEach((b) =>
         b.addEventListener('click', () => renderPulls(container, cid, rid, b.dataset.ghState)));
     } catch (e) {
-      container.innerHTML = `<div class="empty" role="alert"><b>Couldn't load pull requests</b>${esc(e.message)}</div>`;
+      container.innerHTML = `<div class="empty" role="alert"><b>Couldn't load pull requests</b>${esc(e.message)} <button class="btn" data-pulls-retry>Retry</button></div>`;
+      container.querySelector('[data-pulls-retry]')?.addEventListener('click', () => renderPulls(container, cid, rid, stateFilter));
     }
   }
 
@@ -836,10 +892,58 @@
   }
 
   /* ---------- composer ---------- */
+  // Typing clears the invalid state on the field being fixed, same as the
+  // auth forms — the composer error line clears on the next submit attempt.
+  ['#composer-to', '#composer-subject', '#composer-input'].forEach((sel) => {
+    const el = $(sel);
+    el.addEventListener('input', () => el.removeAttribute('aria-invalid'));
+    el.addEventListener('change', () => el.removeAttribute('aria-invalid'));
+  });
+
   $('#composer-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const input = $('#composer-input');
     const text = input.value.trim();
+    showComposerErr('');
+
+    if (state.view?.kind === 'mail') {
+      // Validate BEFORE touching any input — a failed validation must never
+      // eat a draft. Focus jumps to the first invalid field, auth-form style.
+      const to = $('#composer-to');
+      const subjectEl = $('#composer-subject');
+      [to, subjectEl, input].forEach((el) => el.removeAttribute('aria-invalid'));
+      const missing = [];
+      let firstBad = null;
+      const mark = (el, label) => {
+        el.setAttribute('aria-invalid', 'true');
+        if (!firstBad) firstBad = el;
+        missing.push(label);
+      };
+      if (!to.value) mark(to, 'a recipient');
+      if (!subjectEl.value.trim()) mark(subjectEl, 'a subject');
+      if (!text) mark(input, 'a message');
+      if (firstBad) {
+        const list = missing.length === 1 ? missing[0]
+          : missing.length === 2 ? `${missing[0]} and ${missing[1]}`
+          : `${missing[0]}, ${missing[1]} and ${missing[2]}`;
+        showComposerErr(`Add ${list} first.`);
+        firstBad.focus();
+        return;
+      }
+      try {
+        await api('/v1/mail', {
+          method: 'POST',
+          body: JSON.stringify({ to_agent_id: +to.value, subject: subjectEl.value.trim(), body: text }),
+        });
+        input.value = '';
+        subjectEl.value = '';
+        showMail();
+      } catch (err) {
+        showComposerErr(`Send failed: ${err.message}`);
+      }
+      return;
+    }
+
     if (!text) return;
     input.value = '';
     try {
@@ -861,24 +965,10 @@
         });
         setReply(null);
         await loadMessages(`/v1/dms/${state.view.id}/messages`);
-      } else if (state.view?.kind === 'mail') {
-        const [subject, ...rest] = text.split('|');
-        const partner = state.agents.find((a) => a.id !== state.me.agent.id);
-        if (!subject.trim() || rest.length === 0 || !partner) {
-          stream.insertAdjacentHTML('afterbegin',
-            `<div class="empty" style="padding:var(--sp-3)">Format: <span class="mono">subject | body</span>, and at least one other agent must exist.</div>`);
-          return;
-        }
-        await api('/v1/mail', {
-          method: 'POST',
-          body: JSON.stringify({ to_agent_id: partner.id, subject: subject.trim(), body: rest.join('|').trim() }),
-        });
-        showMail();
       }
     } catch (err) {
       input.value = text;
-      stream.insertAdjacentHTML('afterbegin',
-        `<div class="empty" style="padding:var(--sp-3)" role="alert">Send failed: ${esc(err.message)}</div>`);
+      showComposerErr(`Send failed: ${err.message}`);
     }
   });
 
@@ -1166,6 +1256,7 @@
     const v = await api('/v1/agents?limit=100');
     state.agents = v.agents ?? [];
     renderNav();
+    syncMailComposer(); // the To picker tracks registrations while Mailbox is open
   }
   async function loadChannels() {
     const v = await api('/v1/channels');
@@ -1173,14 +1264,23 @@
     renderNav();
   }
 
-  function showBootError(err) {
+  function showBootError(err, retryFn) {
+    // Sidebar identity may still say "Loading…" if boot failed before /ui/api/me
+    // answered — nothing may stay stuck on a loading label.
+    if (!state.me?.agent) {
+      $('#me-name').textContent = 'Not connected';
+      $('#me-avatar').textContent = '–';
+    }
+    paneTitle.textContent = 'Workspace';
+    paneSub.textContent = '';
     stream.innerHTML = `
       <div class="empty" role="alert">
         <b>Couldn't load your workspace</b>
-        <p style="margin:0 0 var(--sp-4)">${esc(err?.message || 'Network error')} — channels and the agent directory did not load.</p>
+        <p style="margin:0 0 var(--sp-4)">${esc(err?.message || 'Network error')} — channels and the agent directory did not load.
+        Views such as the Inbox can still be opened from the sidebar.</p>
         <button class="btn btn-primary" id="retry-boot" type="button">Retry</button>
       </div>`;
-    $('#retry-boot').addEventListener('click', initialLoad);
+    $('#retry-boot').addEventListener('click', retryFn);
   }
 
   async function initialLoad() {
@@ -1189,19 +1289,33 @@
       await loadChannels();
       await loadDirectory();
     } catch (err) {
-      showBootError(err);
+      showBootError(err, initialLoad);
       return;
     }
     showInbox();
   }
 
   async function boot() {
+    let res;
     try {
-      const res = await fetch('/ui/api/me');
-      if (res.status === 401) { location.href = '/login'; return; }
+      res = await fetch('/ui/api/me');
+    } catch {
+      showBootError(new Error('Network error — the hub did not answer'), boot);
+      return;
+    }
+    if (res.status === 401) { location.href = '/login'; return; }
+    if (!res.ok) {
+      showBootError(new Error(`The hub answered ${res.status} ${res.statusText}`), boot);
+      return;
+    }
+    try {
       state.me = await res.json();
-      state.token = state.me.agent.token;
-    } catch { location.href = '/login'; return; }
+      if (!state.me?.agent?.id) throw new Error('identity missing');
+    } catch {
+      showBootError(new Error('The hub answered with unexpected data'), boot);
+      return;
+    }
+    state.token = state.me.agent.token;
 
     $('#me-avatar').textContent = initials(state.me.agent.handle);
     $('#me-name').textContent = state.me.agent.name;
@@ -1212,13 +1326,16 @@
       ws.hidden = false;
     }
 
-    document.querySelectorAll('[data-view]').forEach((b) =>
-      b.addEventListener('click', () => {
-        ({ inbox: showInbox, mail: showMail, agents: showAgents, runs: showRuns, github: showGithub, notes: showNotes })[b.dataset.view]();
-      }));
-
     initialLoad();
   }
+
+  // Nav is static markup: bind once here, outside boot(), so a boot retry
+  // never stacks duplicate listeners. Clicks must keep working even while the
+  // boot error is showing — the Inbox stays openable from any failed state.
+  document.querySelectorAll('[data-view]').forEach((b) =>
+    b.addEventListener('click', () => {
+      ({ inbox: showInbox, mail: showMail, agents: showAgents, runs: showRuns, github: showGithub, notes: showNotes })[b.dataset.view]();
+    }));
 
   boot();
 })();

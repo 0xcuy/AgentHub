@@ -19,10 +19,11 @@
   .me .who b { display: block; color: var(--heading); font-size: var(--fs-sm); font-weight: 600; }
   .me .who span { color: var(--faint); font-size: var(--fs-xs); }
   .me .who .ws { color: var(--mint); font-size: var(--fs-xs); display: block; }
+  .me .who .ws[hidden] { display: none; }
   .nav { padding: var(--sp-3) var(--sp-2) var(--sp-6); }
   .nav h4 { color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; margin: var(--sp-4) var(--sp-2) var(--sp-1); font-weight: 600; }
-  .nav button.item { display: flex; width: 100%; align-items: center; gap: 10px; padding: 8px 10px; min-height: 36px; border: 0; background: transparent; color: var(--muted); border-radius: var(--r-md); cursor: pointer; text-align: left; font-size: var(--fs-md); transition: background .18s var(--ease), color .18s var(--ease); }
-  .nav button.item:hover { background: var(--surface); color: var(--text); }
+  .nav button.item { display: flex; width: 100%; align-items: center; gap: 10px; padding: 8px 10px; min-height: 36px; border: 0; background: transparent; color: var(--muted); border-radius: var(--r-md); cursor: pointer; text-align: left; font-size: var(--fs-md); transition: background .18s var(--ease), color .18s var(--ease), transform .18s var(--ease); }
+  .nav button.item:hover { background: var(--surface); color: var(--text); transform: translateX(2px); }
   .nav button.item.active { background: rgba(139, 123, 255, 0.13); color: var(--accent-strong); box-shadow: inset 2px 0 0 var(--accent-strong); }
   .nav button.item svg { width: 16px; height: 16px; flex: none; opacity: .75; }
   .nav button.item .hash { color: var(--faint); font-weight: 600; width: 14px; flex: none; }
@@ -92,12 +93,42 @@
   .iconbtn[hidden], .members-panel[hidden] { display: none; }
 
   .composer { border-top: 1px solid var(--border); padding: var(--sp-3) var(--sp-5) var(--sp-4); position: relative; z-index: 2;
-    background: rgba(4, 6, 13, .85); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
-  .composer form { display: flex; gap: var(--sp-3); align-items: flex-end; max-width: 860px; }
-  .composer textarea { flex: 1; min-width: 0; background: var(--bg-deep); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 11px var(--sp-3); resize: none; min-height: 44px; max-height: 160px; transition: border-color .2s var(--ease), box-shadow .2s var(--ease); }
-  .composer textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(139, 123, 255, .22); }
+    box-shadow: 0 -10px 30px -14px rgba(0, 0, 0, 0.55); }
+  .composer form { display: flex; flex-direction: column; gap: var(--sp-2); max-width: 860px; }
+  .composer-main { display: flex; gap: var(--sp-3); align-items: flex-end; }
+  .composer textarea { flex: 1; min-width: 0; background: var(--bg-deep); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 11px var(--sp-3); resize: none; min-height: 44px; max-height: 160px; box-shadow: inset 0 1px 3px rgba(0, 0, 0, .35); transition: border-color .2s var(--ease), box-shadow .2s var(--ease); }
+  .composer textarea:focus { outline: none; border-color: var(--accent); box-shadow: inset 0 1px 3px rgba(0, 0, 0, .35), 0 0 0 3px rgba(139, 123, 255, .22); }
+  /* mail-only fields: required To picker + subject, split from the body */
+  .mail-fields { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
+  .mail-fields[hidden] { display: none; }
+  .mail-to { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: var(--fs-sm); }
+  .composer select, .composer input[type="text"] {
+    background: var(--bg-deep); border: 1px solid var(--border); border-radius: var(--r-lg);
+    padding: 9px var(--sp-3); min-height: 40px; color: var(--text); font: inherit; font-size: var(--fs-md);
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, .35);
+    transition: border-color .2s var(--ease), box-shadow .2s var(--ease); }
+  .composer select { max-width: 180px; cursor: pointer; }
+  .composer select:disabled { opacity: .55; cursor: default; }
+  .composer input[type="text"] { flex: 1; min-width: 120px; }
+  .composer select:focus, .composer input[type="text"]:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, .35), 0 0 0 3px rgba(139, 123, 255, .22); }
+  .composer select[aria-invalid="true"], .composer input[type="text"][aria-invalid="true"],
+  .composer textarea[aria-invalid="true"] { border-color: rgba(251, 113, 133, .6); }
+  .composer select[aria-invalid="true"]:focus, .composer input[type="text"][aria-invalid="true"]:focus,
+  .composer textarea[aria-invalid="true"]:focus { border-color: var(--err);
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, .35), 0 0 0 3px rgba(251, 113, 133, .2); }
+  .composer-note { margin: 0; color: var(--gold); font-size: var(--fs-xs); }
+  .composer-note[hidden] { display: none; }
+  .composer-err { margin: 0; color: var(--err); font-size: var(--fs-xs); min-height: 0; }
+  .composer-err:empty { display: none; }
+  .composer-err:not(:empty) { animation: errIn .2s var(--ease); }
   .composer .urgent-toggle { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: var(--fs-sm);
     cursor: pointer; user-select: none; padding-bottom: 10px; white-space: nowrap; }
+  /* display:flex above beats the hidden attribute's UA style — without this
+     the toggle renders in every view even though JS sets hidden (same cascade
+     class as the landing's .typing[hidden] fix) */
+  .composer .urgent-toggle[hidden] { display: none; }
   .composer .urgent-toggle input { accent-color: #f59e0b; width: 15px; height: 15px; cursor: pointer; }
   .composer .urgent-toggle:has(input:checked) { color: #fdba74; font-weight: 600; }
 
@@ -258,12 +289,23 @@
         <button type="button" class="btn btn-ghost" id="reply-cancel" aria-label="Cancel reply">Cancel</button>
       </div>
       <form id="composer-form">
-        <textarea id="composer-input" rows="1" placeholder="Message…" aria-label="Message"></textarea>
-        <label class="urgent-toggle" id="urgent-toggle" hidden title="Flag this message as urgent">
-          <input type="checkbox" id="composer-urgent">
-          <span>Urgent</span>
-        </label>
-        <button class="btn btn-primary" type="submit">Send</button>
+        <div class="mail-fields" id="composer-mail-fields" hidden>
+          <span class="mail-to">
+            <label for="composer-to">To</label>
+            <select id="composer-to" aria-describedby="composer-err"></select>
+          </span>
+          <input type="text" id="composer-subject" placeholder="Subject…" aria-label="Subject" autocomplete="off" maxlength="200" aria-describedby="composer-err">
+        </div>
+        <p class="composer-note" id="composer-note" hidden></p>
+        <div class="composer-main">
+          <textarea id="composer-input" rows="1" placeholder="Message…" aria-label="Message" aria-describedby="composer-err"></textarea>
+          <label class="urgent-toggle" id="urgent-toggle" hidden title="Flag this message as urgent">
+            <input type="checkbox" id="composer-urgent">
+            <span>Urgent</span>
+          </label>
+          <button class="btn btn-primary" type="submit" id="composer-send">Send</button>
+        </div>
+        <p class="composer-err" id="composer-err" role="alert"></p>
       </form>
     </div>
   </main>

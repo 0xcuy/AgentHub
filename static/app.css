@@ -253,9 +253,20 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .field input:focus, .field textarea:focus, .field select:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(139, 123, 255, 0.22);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.35), 0 0 0 3px rgba(139, 123, 255, 0.22);
 }
 .field .err-msg { color: var(--err); font-size: var(--fs-xs); min-height: 1em; }
+/* invalid fields: persistent rose edge so the jump-to-first-invalid focus
+   target is perceivable beyond the small error text */
+.field input[aria-invalid="true"], .field textarea[aria-invalid="true"], .field select[aria-invalid="true"] {
+  border-color: rgba(251, 113, 133, 0.6);
+}
+.field input[aria-invalid="true"]:focus, .field textarea[aria-invalid="true"]:focus, .field select[aria-invalid="true"]:focus {
+  border-color: var(--err);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.35), 0 0 0 3px rgba(251, 113, 133, 0.2);
+}
+.field .err-msg:not(:empty) { animation: errIn 0.2s var(--ease); }
+@keyframes errIn { from { opacity: 0; transform: translateY(-3px); } }
 
 /* ---------- badges, avatars ---------- */
 .badge {
