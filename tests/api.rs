@@ -2194,6 +2194,286 @@ async fn migration_backfills_legacy_rows_into_workspace_1() {
     let _ = std::fs::remove_file(format!("{db_path}-shm"));
 }
 
+// --- lens 1: mentions-only wake mode + agent role ---
+
+/// Poll the webhook receiver until a payload matching `pred` arrives.
+async fn wait_for_payload(
+    received: &Arc<Mutex<Vec<Value>>>,
+    what: &str,
+    pred: impl Fn(&Value) -> bool,
+) -> Value {
+    for _ in 0..50 {
+        if let Some(p) = received.lock().unwrap().iter().find(|p| pred(p)) {
+            return p.clone();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("webhook never received {what}");
+}
+
+#[tokio::test]
+async fn channel_wake_mentions_only_by_default() {
+    let (base, received) = start_webhook_server().await;
+    let hook = format!("{base}/run");
+    let router = test_app("wake-mentions");
+    let (a1, t1) = register(&router, "walpha", Some(&hook)).await;
+    let (a2, t2) = add_agent(&router, &t1, "wbeta", Some(&hook)).await;
+    let _ = a1;
+
+    let (status, v) = call(
+        &router,
+        "POST",
+        "/v1/channels",
+        Some(&t1),
+        Some(json!({ "name": "wake", "member_ids": [a2] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    assert_eq!(
+        v["channel"]["wake_mode"], "mentions",
+        "new channels must default to mentions-only"
+    );
+    let chan = v["channel"]["id"].as_i64().unwrap();
+
+    // (a) a message without an @-mention wakes no webhook and enqueues no run
+    let (status, _) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{chan}/messages"),
+        Some(&t2),
+        Some(json!({ "body": "status: build is green" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+    assert!(
+        received.lock().unwrap().is_empty(),
+        "a non-mentioning message must not wake walpha's webhook"
+    );
+    let (_, v) = call(&router, "GET", "/v1/runs", Some(&t1), None).await;
+    assert!(
+        v["runs"].as_array().unwrap().is_empty(),
+        "no run may be enqueued for a non-mentioning message"
+    );
+
+    // ...but the message still reaches the human inbox (polling unchanged)
+    let (status, v) = call(&router, "GET", "/v1/inbox", Some(&t1), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["message"]["body"] == "status: build is green"),
+        "inbox must still show the message"
+    );
+
+    // (b) an @-mention wakes the mentioned member's webhook
+    let (status, _) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{chan}/messages"),
+        Some(&t2),
+        Some(json!({ "body": "@walpha please review the build" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let p = wait_for_payload(&received, "the @-mention", |p| {
+        p["message"]["body"] == "@walpha please review the build"
+    })
+    .await;
+    assert_eq!(p["agent_handle"], "walpha");
+
+    // an explicit wake request also wakes the member, mention or not
+    let (status, _) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{chan}/messages"),
+        Some(&t2),
+        Some(json!({ "body": "deploy freeze until further notice", "wake": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    wait_for_payload(&received, "the explicit wake request", |p| {
+        p["message"]["body"] == "deploy freeze until further notice"
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn channel_wake_all_mode_switched_by_admin() {
+    let (base, received) = start_webhook_server().await;
+    let hook = format!("{base}/run");
+    let router = test_app("wake-all");
+    let (a1, t1) = register(&router, "calpha", Some(&hook)).await;
+    let (a2, t2) = add_agent(&router, &t1, "cbeta", Some(&hook)).await;
+    let _ = a1;
+
+    let (_, v) = call(
+        &router,
+        "POST",
+        "/v1/channels",
+        Some(&t1),
+        Some(json!({ "name": "eng", "member_ids": [a2] })),
+    )
+    .await;
+    let chan = v["channel"]["id"].as_i64().unwrap();
+
+    // a plain member cannot switch the mode
+    let (status, _) = call(
+        &router,
+        "PATCH",
+        &format!("/v1/channels/{chan}"),
+        Some(&t2),
+        Some(json!({ "wake_mode": "all" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "only channel admins may toggle");
+
+    // the admin switches the channel back to waking on every message
+    let (status, v) = call(
+        &router,
+        "PATCH",
+        &format!("/v1/channels/{chan}"),
+        Some(&t1),
+        Some(json!({ "wake_mode": "all" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["channel"]["wake_mode"], "all");
+
+    // a message without any mention now wakes the webhook
+    let (status, _) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{chan}/messages"),
+        Some(&t2),
+        Some(json!({ "body": "plain status update" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let p = wait_for_payload(&received, "the all-messages wake", |p| {
+        p["message"]["body"] == "plain status update"
+    })
+    .await;
+    assert_eq!(p["agent_handle"], "calpha");
+
+    // unknown modes are rejected
+    let (status, _) = call(
+        &router,
+        "PATCH",
+        &format!("/v1/channels/{chan}"),
+        Some(&t1),
+        Some(json!({ "wake_mode": "sometimes" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // and the mode round-trips through the channel list
+    let (_, v) = call(&router, "GET", "/v1/channels", Some(&t1), None).await;
+    let ch = v["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"].as_i64() == Some(chan))
+        .unwrap()
+        .clone();
+    assert_eq!(ch["wake_mode"], "all");
+}
+
+#[tokio::test]
+async fn agent_role_round_trip() {
+    let router = test_app("role");
+    let (a1, t1) = register(&router, "ralpha", None).await;
+    let (a2, t2) = add_agent(&router, &t1, "rbeta", None).await;
+
+    // role starts empty and is part of agent objects
+    let (status, v) = call(&router, "GET", "/v1/agents/me", Some(&t1), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["agent"]["role"], "", "role is empty until set");
+
+    // the agent sets its own role
+    let (status, v) = call(
+        &router,
+        "PATCH",
+        "/v1/agents/me",
+        Some(&t1),
+        Some(json!({ "role": "mandor" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["agent"]["role"], "mandor");
+    let (_, v) = call(&router, "GET", "/v1/agents/me", Some(&t1), None).await;
+    assert_eq!(v["agent"]["role"], "mandor", "role must round-trip");
+
+    // the workspace admin (the human's linked agent) sets another agent's role
+    let (status, v) = call(
+        &router,
+        "PATCH",
+        &format!("/v1/agents/{a2}"),
+        Some(&t1),
+        Some(json!({ "role": "QA" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["agent"]["role"], "QA");
+    let (_, v) = call(&router, "GET", "/v1/agents", Some(&t1), None).await;
+    let beta = v["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"].as_i64() == Some(a2))
+        .unwrap()
+        .clone();
+    assert_eq!(beta["role"], "QA", "directory must return the role");
+
+    // the agent itself may also set its role through the same endpoint
+    let (status, v) = call(
+        &router,
+        "PATCH",
+        &format!("/v1/agents/{a2}"),
+        Some(&t2),
+        Some(json!({ "role": "worker" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["agent"]["role"], "worker");
+
+    // a plain member cannot set someone else's role
+    let (status, _) = call(
+        &router,
+        "PATCH",
+        &format!("/v1/agents/{a1}"),
+        Some(&t2),
+        Some(json!({ "role": "boss" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // roles are free-form but short
+    let (status, _) = call(
+        &router,
+        "PATCH",
+        &format!("/v1/agents/{a1}"),
+        Some(&t1),
+        Some(json!({ "role": "x".repeat(65) })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // an empty string clears the role
+    let (status, v) = call(
+        &router,
+        "PATCH",
+        &format!("/v1/agents/{a2}"),
+        Some(&t2),
+        Some(json!({ "role": "" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["agent"]["role"], "");
+}
+
 
 
 // --- Lens 3: terms/trust — listing auth, webhook leaks, token leak, login throttle ---

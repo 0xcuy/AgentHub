@@ -2,8 +2,8 @@ use super::{extract_id, is_unique_violation, require_agent};
 use crate::error::ApiError;
 use crate::events::LiveEvent;
 use crate::models::{
-    now_iso, valid_post_policy, Channel, CreateChannel, CreateMessage, Message, Page, UpdateChannel,
-    page_params,
+    now_iso, valid_post_policy, valid_wake_mode, Channel, CreateChannel, CreateMessage, Message,
+    Page, UpdateChannel, page_params,
 };
 use crate::state::AppState;
 use crate::triggers;
@@ -14,7 +14,7 @@ use axum::Json;
 use rusqlite::params;
 use rusqlite::OptionalExtension;
 
-const CHANNEL_COLS: &str = "id, name, topic, created_at, post_policy";
+const CHANNEL_COLS: &str = "id, name, topic, created_at, post_policy, wake_mode";
 
 fn map_channel_row(r: &rusqlite::Row) -> rusqlite::Result<Channel> {
     Ok(Channel {
@@ -23,6 +23,7 @@ fn map_channel_row(r: &rusqlite::Row) -> rusqlite::Result<Channel> {
         topic: r.get(2)?,
         created_at: r.get(3)?,
         post_policy: r.get(4)?,
+        wake_mode: r.get(5)?,
     })
 }
 
@@ -127,6 +128,11 @@ pub async fn update(
             return Err(ApiError::bad_request("post_policy must be 'members' or 'admins'"));
         }
     }
+    if let Some(m) = &input.wake_mode {
+        if !valid_wake_mode(m) {
+            return Err(ApiError::bad_request("wake_mode must be 'mentions' or 'all'"));
+        }
+    }
     state.db.try_with(|c| {
         let tx = c.transaction()?;
         // Workspace scoping: a channel from another workspace reads as
@@ -161,6 +167,12 @@ pub async fn update(
             tx.execute(
                 "UPDATE channels SET post_policy = ?1 WHERE id = ?2",
                 params![p, id],
+            )?;
+        }
+        if let Some(m) = &input.wake_mode {
+            tx.execute(
+                "UPDATE channels SET wake_mode = ?1 WHERE id = ?2",
+                params![m, id],
             )?;
         }
         tx.commit()?;
@@ -313,12 +325,13 @@ pub async fn send_message(
 
     let (message, run_ids, receipts) = state.db.try_with(|c| {
         let tx = c.transaction()?;
-        let row: (String, Option<String>) = match tx.query_row(
+        let row: (String, Option<String>, String) = match tx.query_row(
             "SELECT post_policy,
-                    (SELECT role FROM channel_members WHERE channel_id = ?1 AND agent_id = ?2)
+                    (SELECT role FROM channel_members WHERE channel_id = ?1 AND agent_id = ?2),
+                    wake_mode
              FROM channels WHERE id = ?1 AND workspace_id = ?3",
             params![id, agent.id, agent.workspace_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         ) {
             Ok(v) => v,
             Err(rusqlite::Error::QueryReturnedNoRows) => {
@@ -326,7 +339,7 @@ pub async fn send_message(
             }
             Err(e) => return Err(e.into()),
         };
-        let (post_policy, role) = row;
+        let (post_policy, role, wake_mode) = row;
         let Some(role) = role else {
             return Err(ApiError::forbidden());
         };
@@ -370,6 +383,43 @@ pub async fn send_message(
             stmt.query_map(params![id, agent.id], |r| r.get(0))
                 .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())?
         };
+        // Webhook wake: receipts always go to every member, but which member
+        // webhooks a message wakes depends on the channel's wake mode.
+        // "all": every message wakes every webhook member (pre-lens-1
+        // behaviour). "mentions" (default): only members the message
+        // @-mentions, or everyone when the sender explicitly sets wake=true.
+        // Inbox/history views are unaffected either way.
+        let explicit_wake = input.wake.unwrap_or(false);
+        let webhook_targets: Vec<i64> = if wake_mode == "all" || explicit_wake {
+            recipient_ids.clone()
+        } else {
+            let body_lower = message.body.to_lowercase();
+            let mut stmt = tx.prepare(
+                "SELECT cm.agent_id, a.handle FROM channel_members cm
+                 JOIN agents a ON a.id = cm.agent_id
+                 WHERE cm.channel_id = ?1 AND cm.agent_id != ?2",
+            )?;
+            let rows = stmt
+                .query_map(params![id, agent.id], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows.into_iter()
+                .filter(|(_, handle)| {
+                    // Handles are lowercase [a-z0-9_-]; a mention must end at a
+                    // non-handle character so "@alphax" does not wake "alpha".
+                    let tag = format!("@{handle}");
+                    body_lower.match_indices(&tag).any(|(i, _)| {
+                        body_lower[i + tag.len()..]
+                            .chars()
+                            .next()
+                            .map(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+                            .unwrap_or(true)
+                    })
+                })
+                .map(|(agent_id, _)| agent_id)
+                .collect()
+        };
         let mut receipts = Vec::new();
         for rid in &recipient_ids {
             let receipt_id: i64 = tx.query_row(
@@ -379,7 +429,7 @@ pub async fn send_message(
             )?;
             receipts.push((*rid, receipt_id));
         }
-        let run_ids = triggers::enqueue_runs(&tx, message.id, &recipient_ids, "message")?;
+        let run_ids = triggers::enqueue_runs(&tx, message.id, &webhook_targets, "message")?;
         tx.commit()?;
         Ok((message, run_ids, receipts))
     })?;

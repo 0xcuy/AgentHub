@@ -97,13 +97,40 @@
     state.view = { kind: 'channel', id };
     const ch = state.channels.find((c) => c.id === id);
     paneTitle.textContent = `# ${ch?.name ?? ''}`;
-    paneSub.textContent = ch?.topic || '';
+    paneSub.innerHTML = ch
+      ? `${esc(ch.topic || '')} <button class="btn" id="wake-toggle"
+           title="Which channel messages wake members' webhooks. Inbox and history always show every message.">wake: ${ch.wake_mode === 'all' ? 'all messages' : 'mentions only'}</button>
+         <span class="faint" id="wake-msg" style="margin-left:6px"></span>`
+      : '';
     setComposer(true, `Message #${ch?.name ?? ''}`);
     renderNav();
+    $('#wake-toggle')?.addEventListener('click', toggleWakeMode);
     const items = await loadMessages(`/v1/channels/${id}/messages`);
     state.members = { ...state.members, channelId: id, seen: new Map() };
     collectSeenSenders(items);
     renderMembersPanel();
+  }
+
+  // Channel admins can switch between waking member webhooks on @-mentions
+  // only (default) and on every message.
+  async function toggleWakeMode() {
+    const id = state.view.id;
+    const ch = state.channels.find((c) => c.id === id);
+    if (!ch) return;
+    const next = ch.wake_mode === 'all' ? 'mentions' : 'all';
+    const msg = $('#wake-msg');
+    if (msg) msg.textContent = '';
+    try {
+      const v = await api(`/v1/channels/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ wake_mode: next }),
+      });
+      const i = state.channels.findIndex((c) => c.id === id);
+      if (i >= 0 && v?.channel) state.channels[i] = v.channel;
+      showChannel(id);
+    } catch (err) {
+      if (msg) msg.textContent = err.message;
+    }
   }
 
   async function showDm(agentId) {
@@ -240,7 +267,14 @@
         <div class="row">
           ${avatarEl(a.handle)}
           <div class="grow"><b>${esc(a.name)}</b> <span class="muted mono">@${esc(a.handle)}</span>
-            <p>${a.webhook_url ? `webhook ${esc(a.webhook_url)}` : 'no webhook'} · joined ${esc(when(a.created_at))}</p></div>
+            ${a.role ? `<span class="badge">${esc(a.role)}</span>` : ''}
+            <p>${a.webhook_url ? `webhook ${esc(a.webhook_url)}` : 'no webhook'} · joined ${esc(when(a.created_at))}</p>
+            <form class="role-edit" data-role-for="${a.id}" style="display:flex;gap:6px;align-items:center;margin-top:6px;max-width:340px">
+              <input class="role-input" value="${esc(a.role || '')}" maxlength="64"
+                placeholder="role (mandor, QA, worker…)" aria-label="Role for @${esc(a.handle)}" style="flex:1">
+              <button class="btn" type="submit">Set role</button>
+            </form>
+          </div>
           ${a.id === state.me.agent.id
             ? '<span class="badge ok"><span class="dot"></span>you</span>'
             : `<button class="btn" data-dm="${a.id}">Message</button>`}
@@ -248,6 +282,8 @@
       stream.querySelectorAll('[data-dm]').forEach((b) =>
         b.addEventListener('click', () => showDm(+b.dataset.dm)));
       $('#agents-add')?.addEventListener('click', openAddAgentDialog);
+      stream.querySelectorAll('form.role-edit').forEach((f) =>
+        f.addEventListener('submit', (e) => { e.preventDefault(); setAgentRole(+f.dataset.roleFor, f); }));
     } catch (e) {
       stream.innerHTML = `<div class="empty"><b>Couldn't load directory</b>${esc(e.message)}</div>`;
     }
@@ -260,6 +296,27 @@
     $('#aa-msg').textContent = '';
     dlg.showModal();
     $('#aa-name').focus();
+  }
+
+  // Role is free-form ("mandor", "QA", "worker"); each agent sets its own.
+  async function setAgentRole(agentId, form) {
+    const input = form.querySelector('.role-input');
+    const value = input.value.trim();
+    try {
+      const v = await api(`/v1/agents/${agentId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ role: value }),
+      });
+      const updated = v?.agent;
+      const i = state.agents.findIndex((a) => a.id === agentId);
+      if (i >= 0 && updated) state.agents[i] = updated;
+      if (updated?.id === state.me.agent.id) state.me.agent = { ...state.me.agent, role: updated.role };
+      showAgents();
+    } catch (err) {
+      input.setCustomValidity(err.message);
+      input.reportValidity();
+      setTimeout(() => input.setCustomValidity(''), 3000);
+    }
   }
 
   async function registerAgent(e) {
@@ -885,7 +942,7 @@
 
     $('#me-avatar').textContent = initials(state.me.agent.handle);
     $('#me-name').textContent = state.me.agent.name;
-    $('#me-handle').textContent = '@' + state.me.agent.handle;
+    $('#me-handle').textContent = '@' + state.me.agent.handle + (state.me.agent.role ? ` · ${state.me.agent.role}` : '');
     if (state.me.workspace) {
       const ws = $('#me-workspace');
       ws.textContent = state.me.workspace.name;
