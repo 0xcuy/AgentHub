@@ -23,6 +23,13 @@ pub struct AppState {
     /// Embedding provider for the optional vector layer. Noop (disabled)
     /// unless a key is configured via the environment.
     pub embeddings: Arc<dyn crate::embeddings::EmbeddingProvider>,
+    /// GitHub transport for the channel GitHub integration. Noop (disabled)
+    /// unless GITHUB_TOKEN is configured via the environment.
+    pub github: Arc<dyn crate::github::GitHubTransport>,
+    /// Seconds a cached GitHub pull-request list stays fresh.
+    pub github_cache_ttl_secs: i64,
+    /// Maximum linked repositories per channel.
+    pub github_max_repos: i64,
 }
 
 pub const DEFAULT_MEMORY_CAP: usize = 500;
@@ -77,12 +84,70 @@ pub fn memory_min_score_from_env() -> f64 {
         .unwrap_or(DEFAULT_MEMORY_MIN_SCORE)
 }
 
+/// How long cached GitHub pull requests stay fresh before the next list
+/// refreshes them from the transport.
+pub const DEFAULT_GITHUB_CACHE_TTL_SECS: i64 = 300;
+
+pub fn parse_github_cache_ttl(raw: &str) -> Result<i64, String> {
+    let n: i64 = raw
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid AGHUB_GITHUB_CACHE_TTL_SECS: {raw:?}"))?;
+    if n < 0 {
+        return Err("AGHUB_GITHUB_CACHE_TTL_SECS must be >= 0".into());
+    }
+    Ok(n)
+}
+
+pub fn github_cache_ttl_from_env() -> i64 {
+    std::env::var("AGHUB_GITHUB_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|raw| match parse_github_cache_ttl(&raw) {
+            Ok(n) => Some(n),
+            Err(e) => {
+                tracing::warn!(error = %e, "falling back to default github cache ttl");
+                None
+            }
+        })
+        .unwrap_or(DEFAULT_GITHUB_CACHE_TTL_SECS)
+}
+
+pub const DEFAULT_GITHUB_MAX_REPOS: i64 = 10;
+
+pub fn parse_github_max_repos(raw: &str) -> Result<i64, String> {
+    let n: i64 = raw
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid AGHUB_GITHUB_MAX_REPOS_PER_CHANNEL: {raw:?}"))?;
+    if n < 0 {
+        return Err("AGHUB_GITHUB_MAX_REPOS_PER_CHANNEL must be >= 0".into());
+    }
+    Ok(n)
+}
+
+pub fn github_max_repos_from_env() -> i64 {
+    std::env::var("AGHUB_GITHUB_MAX_REPOS_PER_CHANNEL")
+        .ok()
+        .and_then(|raw| match parse_github_max_repos(&raw) {
+            Ok(n) => Some(n),
+            Err(e) => {
+                tracing::warn!(error = %e, "falling back to default github repo cap");
+                None
+            }
+        })
+        .unwrap_or(DEFAULT_GITHUB_MAX_REPOS)
+}
+
 impl AppState {
     pub fn new(db: crate::db::Db, http: reqwest::Client) -> Self {
         let cap = memory_cap_from_env();
         let min_score = memory_min_score_from_env();
         let embeddings = crate::embeddings::from_env(http.clone());
         tracing::info!(cap, min_score, provider = embeddings.name(), "memory enabled");
+        let github = crate::github::from_env(http.clone());
+        let github_cache_ttl_secs = github_cache_ttl_from_env();
+        let github_max_repos = github_max_repos_from_env();
+        tracing::info!(provider = github.name(), enabled = github.enabled(), "github integration");
         Self {
             db,
             http,
@@ -100,6 +165,9 @@ impl AppState {
             memory_cap: cap,
             memory_min_score: min_score,
             embeddings,
+            github,
+            github_cache_ttl_secs,
+            github_max_repos,
         }
     }
 }

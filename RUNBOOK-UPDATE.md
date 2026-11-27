@@ -1,6 +1,31 @@
-# Runbook update — memory recall minimum-score cutoff (26 Nov 2026)
+# Runbook update — channel GitHub integration (26 Nov 2026)
 
-- WHAT: GET /v1/memory with ?query= now drops weak matches when the vector layer is on — memories scoring below AGHUB_MEMORY_MIN_SCORE (new env var, default 0.2, range 0.0-1.0, invalid value falls back to default with a warning) are omitted; listing without a query is unchanged (latest first, score null), and FTS-only mode (no OG_API_KEY) is not cut because FTS scores are normalized relative to the candidate set.
-- THRESHOLD: default 0.2 combined = cosine floor 0.40 — drops the measured noise (~0.13 combined / cosine ~0.26, the Fable "query=reviewer" finding at 26 Nov ~21:00 WIB) while keeping the measured genuine semantic-only match (0.2508 combined / cosine ~0.50); the suggested 0.3 would have killed that match, so the number comes from the measured scores, not the suggestion.
-- TESTS: full cargo test 28 passed / 0 failed — new cases in tests/memory.rs: memory_recall_min_score_drops_unrelated, memory_recall_keeps_lexical_match_under_cutoff, memory_recall_keeps_semantic_match_under_cutoff, memory_recall_min_score_env_var.
-- BRANCH: opus-memory-cutoff, commit 74256631199ff2596ef72969040d30e219ef8cf7 (base 9a431b8); docs in openapi.yaml (GET /v1/memory) and MEMORY-REPORT.md section "Run 3 — minimum-score cutoff untuk recall (AGHUB_MEMORY_MIN_SCORE)".
+- WHAT: channels can link GitHub repositories and browse their open/closed
+  pull requests in the workspace UI. Routes: `POST|GET
+  /v1/channels/{id}/github/repos`, `DELETE /v1/channels/{id}/github/repos/{repo_id}`,
+  `GET /v1/channels/{id}/github/repos/{repo_id}/pulls`, and `POST
+  /v1/channels/{id}/github/repos/{repo_id}/pulls` to open a PR (channel
+  admins only, like linking; GitHub-side 422s surface as
+  `400 github_rejected`). Schema: migration
+  `0005_github` (github_repos, github_pulls), applied at startup as usual.
+- CONFIG: off by default. Set `GITHUB_TOKEN` to enable (fine-grained PAT with
+  Contents read plus Pull requests read and write); optional `AGHUB_GITHUB_API_URL`
+  (default https://api.github.com), `AGHUB_GITHUB_CACHE_TTL_SECS` (default
+  300), `AGHUB_GITHUB_MAX_REPOS_PER_CHANNEL` (default 10). Without a token the
+  endpoints answer `503 {"error":{"code":"github_unavailable",...}}` — that is
+  the expected state, not an outage.
+- FAILSAFE: PR lists are cached in SQLite and refreshed only when stale; if
+  GitHub is down or rate-limits the token, the API serves the cache and logs
+  `github pull refresh failed` at WARN. The first list of an empty cache is
+  the exception: it needs GitHub and surfaces `502 github_error` (or
+  `404 github_not_found` for a repo the token cannot see).
+- ROLLOUT: no operator action beyond setting the token; the migration is
+  embedded and automatic. To disable, unset `GITHUB_TOKEN` and restart.
+- TESTS: full cargo test 38 passed / 0 failed — GitHub cases in tests/api.rs:
+  github_link_list_unlink_and_visibility (link/unlink now admin-gated),
+  github_link_validates_slugs_and_upstream_errors,
+  github_create_pull (new POST pulls endpoint: admin-only, validation,
+  422→400 github_rejected, 502, caching of the created PR),
+  github_repo_cap_per_channel, github_pulls_cache_filters_and_ttl_refresh,
+  github_unconfigured_returns_503 (all GitHub traffic via the in-process
+  MockGitHub transport; the suite does not touch the network).

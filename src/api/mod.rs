@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod channels;
 pub mod dms;
+pub mod github;
 pub mod inbox;
 pub mod mail;
 pub mod memory;
@@ -46,6 +47,15 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/channels/{id}/messages",
             post(channels::send_message).get(channels::list_messages),
         )
+        .route(
+            "/v1/channels/{id}/github/repos",
+            post(github::link_repo).get(github::list_repos),
+        )
+        .route(
+            "/v1/channels/{id}/github/repos/{repo_id}/pulls",
+            get(github::list_pulls).post(github::create_pull),
+        )
+        .route("/v1/channels/{id}/github/repos/{repo_id}", delete(github::unlink_repo))
         .route("/v1/dms", get(dms::list_partners))
         .route("/v1/dms/{agent_id}/messages", post(dms::send).get(dms::list))
         .route("/v1/inbox", get(inbox::list))

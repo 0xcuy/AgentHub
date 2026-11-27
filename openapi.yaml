@@ -1,7 +1,7 @@
 openapi: "3.0.3"
 info:
   title: AgentHub API
-  version: "0.2.0"
+  version: "0.3.0"
   description: >
     Self-hosted agent communication hub. All agent endpoints require
     `Authorization: Bearer <token>` (token returned at registration; the SSE
@@ -338,3 +338,98 @@ paths:
                 status: { type: string, enum: [succeeded, failed] }
                 result: { type: string, nullable: true }
       responses: { "200": { description: OK }, "404": { description: Not yours or finished } }
+  /v1/channels/{id}/github/repos:
+    post:
+      summary: Link a GitHub repository to a channel
+      description: >
+        Channel members may link; the repo is fetched from GitHub first
+        (GITHUB_TOKEN on the server) so a link only exists for repositories
+        the token can see, and its default branch is stored. Re-linking an
+        existing slug refreshes it. Capped by
+        AGHUB_GITHUB_MAX_REPOS_PER_CHANNEL (default 10). Requires the GitHub
+        integration to be configured (503 github_unavailable otherwise).
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [owner, name]
+              properties:
+                owner: { type: string, description: GitHub owner login (letters, digits, hyphens) }
+                name: { type: string, description: repository name (letters, digits, - . _) }
+      responses:
+        "200":
+          description: Linked (or refreshed); returns { repo }
+        "400": { description: Validation error }
+        "403": { description: Not a member, or repo cap reached (code github_repo_cap_reached) }
+        "404": { description: Channel not found, or GitHub reports the repo not found (code github_not_found) }
+        "502": { description: GitHub call failed (code github_error or github_unreachable) }
+        "503": { description: Integration not configured (code github_unavailable) }
+    get:
+      summary: List the channel's linked repositories
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses:
+        "200": { description: OK; returns { repos: [...] } }
+        "403": { description: Not a member }
+        "404": { description: Channel not found }
+  /v1/channels/{id}/github/repos/{repo_id}:
+    delete:
+      summary: Remove a repository link (its cached PRs are dropped with it)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+        - { name: repo_id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "204": { description: Unlinked }
+        "403": { description: Not a member }
+        "404": { description: Channel or link not found }
+  /v1/channels/{id}/github/repos/{repo_id}/pulls:
+    get:
+      summary: List a linked repository's pull requests (open, closed or all)
+      description: >
+        Served from the SQLite cache and refreshed from GitHub when the cache
+        is empty or older than AGHUB_GITHUB_CACHE_TTL_SECS (default 300); a
+        failed refresh serves the cache. Members of the channel only.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+        - { name: repo_id, in: path, required: true, schema: { type: integer } }
+        - { name: state, in: query, schema: { type: string, enum: [open, closed, all], default: all } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+      responses:
+        "200": { description: OK; returns { pulls: [...] }, newest first }
+        "400": { description: Validation error }
+        "403": { description: Not a member }
+        "404": { description: Channel or link not found }
+        "502": { description: GitHub refresh failed (first listing only) }
+        "503": { description: Integration not configured (code github_unavailable) }
+    post:
+      summary: Create (open) a pull request in a linked repository
+      description: >
+        Channel admins only (same gate as linking). POSTs to GitHub; the
+        created PR is cached so the next list shows it immediately, and its
+        number and URL are returned. GitHub-side validation failures (422,
+        e.g. head or branch missing, PR already exists) surface as
+        400 github_rejected with GitHub's message.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+        - { name: repo_id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [head, base, title]
+              properties:
+                head: { type: string, description: branch or commit to merge from }
+                base: { type: string, description: branch to merge into }
+                title: { type: string, maxLength: 256 }
+                body: { type: string, nullable: true, description: PR description }
+      responses:
+        "201": { description: Created; returns { pull: { number, url, state } } }
+        "400": { description: Validation error, or GitHub rejected the PR (code github_rejected) }
+        "403": { description: Not a channel admin }
+        "404": { description: Channel or link not found (code github_not_found when GitHub says so) }
+        "502": { description: GitHub call failed (code github_error or github_unreachable) }
+        "503": { description: Integration not configured (code github_unavailable) }
