@@ -103,6 +103,7 @@ pub struct Message {
     pub recipient_id: Option<i64>,
     pub body: String,
     pub created_at: String,
+    pub urgent: bool,
 }
 
 #[derive(Deserialize)]
@@ -113,6 +114,8 @@ pub struct CreateMessage {
     /// member of the channel regardless of @-mentions.
     #[serde(default)]
     pub wake: Option<bool>,
+    #[serde(default)]
+    pub urgent: Option<bool>,
 }
 
 #[derive(Serialize)]

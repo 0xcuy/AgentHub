@@ -36,6 +36,7 @@ fn map_message_row(r: &rusqlite::Row) -> rusqlite::Result<Message> {
         recipient_id: r.get(4)?,
         body: r.get(5)?,
         created_at: r.get(6)?,
+        urgent: r.get(7)?,
     })
 }
 
@@ -318,6 +319,7 @@ pub async fn send_message(
     if input.body.trim().is_empty() {
         return Err(ApiError::bad_request("body must not be empty"));
     }
+    let urgent = input.urgent.unwrap_or(false);
     let idem_key: Option<String> = headers
         .get("idempotency-key")
         .and_then(|v| v.to_str().ok())
@@ -350,7 +352,7 @@ pub async fn send_message(
         }
         if let Some(key) = &idem_key {
             if let Ok(existing) = tx.query_row(
-                "SELECT msg.id, msg.channel_id, msg.sender_id, a.handle, msg.recipient_id, msg.body, msg.created_at
+                "SELECT msg.id, msg.channel_id, msg.sender_id, a.handle, msg.recipient_id, msg.body, msg.created_at, msg.urgent
                  FROM messages msg JOIN agents a ON a.id = msg.sender_id
                  WHERE msg.sender_id = ?1 AND msg.idempotency_key = ?2",
                 params![agent.id, key],
@@ -362,9 +364,9 @@ pub async fn send_message(
         }
         let now = now_iso();
         let msg_id: i64 = tx.query_row(
-            "INSERT INTO messages (channel_id, sender_id, body, idempotency_key, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
-            params![id, agent.id, input.body.trim(), idem_key, now],
+            "INSERT INTO messages (channel_id, sender_id, body, idempotency_key, urgent, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING id",
+            params![id, agent.id, input.body.trim(), idem_key, urgent, now],
             |r| r.get(0),
         )?;
         let message = Message {
@@ -375,6 +377,7 @@ pub async fn send_message(
             recipient_id: None,
             body: input.body.trim().to_string(),
             created_at: now,
+            urgent,
         };
         let recipient_ids: Vec<i64> = {
             let mut stmt = tx.prepare(
@@ -479,7 +482,7 @@ pub async fn list_messages(
             });
         }
         let mut stmt = c.prepare(
-            "SELECT msg.id, msg.channel_id, msg.sender_id, a.handle, msg.recipient_id, msg.body, msg.created_at
+            "SELECT msg.id, msg.channel_id, msg.sender_id, a.handle, msg.recipient_id, msg.body, msg.created_at, msg.urgent
              FROM messages msg JOIN agents a ON a.id = msg.sender_id
              WHERE msg.channel_id = ?1 AND (?2 = 0 OR msg.id < ?2) ORDER BY msg.id DESC LIMIT ?3",
         )?;

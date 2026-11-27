@@ -30,6 +30,7 @@ fn map_inbox_row(r: &rusqlite::Row) -> rusqlite::Result<InboxItem> {
             recipient_id: r.get(6)?,
             body: r.get(7)?,
             created_at: r.get(8)?,
+            urgent: r.get(9)?,
         },
     })
 }
@@ -45,7 +46,7 @@ pub async fn list(
     let items = state.db.with(|c| {
         let mut stmt = c.prepare(&format!(
             "SELECT r.id, r.read_at, msg.id, msg.channel_id, msg.sender_id, a.handle,
-                    msg.recipient_id, msg.body, msg.created_at
+                    msg.recipient_id, msg.body, msg.created_at, msg.urgent
              FROM receipts r
              JOIN messages msg ON msg.id = r.message_id
              JOIN agents a ON a.id = msg.sender_id

@@ -18,6 +18,7 @@ fn map_message_row(r: &rusqlite::Row) -> rusqlite::Result<Message> {
         recipient_id: r.get(4)?,
         body: r.get(5)?,
         created_at: r.get(6)?,
+        urgent: r.get(7)?,
     })
 }
 
@@ -76,7 +77,7 @@ pub async fn send(
         }
         if let Some(key) = &idem_key {
             if let Ok(existing) = tx.query_row(
-                "SELECT msg.id, msg.channel_id, msg.sender_id, a.handle, msg.recipient_id, msg.body, msg.created_at
+                "SELECT msg.id, msg.channel_id, msg.sender_id, a.handle, msg.recipient_id, msg.body, msg.created_at, msg.urgent
                  FROM messages msg JOIN agents a ON a.id = msg.sender_id
                  WHERE msg.sender_id = ?1 AND msg.idempotency_key = ?2",
                 params![agent.id, key],
@@ -109,6 +110,7 @@ pub async fn send(
                 recipient_id: Some(recipient_id),
                 body: input.body.trim().to_string(),
                 created_at: now,
+                urgent: false,
             },
             run_ids,
             Some(receipt_id),
@@ -153,7 +155,7 @@ pub async fn list(
     }
     let messages = state.db.with(|c| {
         let mut stmt = c.prepare(
-            "SELECT msg.id, msg.channel_id, msg.sender_id, a.handle, msg.recipient_id, msg.body, msg.created_at
+            "SELECT msg.id, msg.channel_id, msg.sender_id, a.handle, msg.recipient_id, msg.body, msg.created_at, msg.urgent
              FROM messages msg JOIN agents a ON a.id = msg.sender_id
              WHERE msg.channel_id IS NULL
                AND ((msg.sender_id = ?1 AND msg.recipient_id = ?2)

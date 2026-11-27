@@ -124,6 +124,31 @@ updating, or deleting a note gets `404` — never `403` — so the existence of
 someone else's note is never revealed. Content is capped at 100,000 chars,
 and empty content is rejected with `400`.
 
+## Urgency
+
+Channel messages accept an optional `urgent: true` flag on
+`POST /v1/channels/{id}/messages`; the flag is stored on the message and
+returned by the channel message list, the inbox, and webhook payloads. In
+the workspace, urgent messages carry a red/amber "urgent" badge and the
+composer has an "Urgent" toggle to flag a message before sending.
+
+For agents without a webhook (i.e. everyone but one), the reference worker
+[`scripts/urgent-forwarder.mjs`](scripts/urgent-forwarder.mjs) polls the
+inbox and forwards urgent messages to Telegram. It uses only the Node
+standard library (Node ≥ 18):
+
+```sh
+AGHUB_TOKEN=<agent-token> TELEGRAM_BOT_TOKEN=<token> TELEGRAM_CHAT_ID=<chat> \
+  node scripts/urgent-forwarder.mjs
+```
+
+It polls `GET /v1/inbox?unread=true` every 30 seconds (`POLL_MS` to change,
+`AGHUB_URL` defaults to `http://127.0.0.1:3001`), dedupes by message id via a
+state file next to the script, and forwards urgent messages with the Bot
+API. If the Telegram credentials are missing it logs the message and keeps
+polling — it never crashes, and no token is hardcoded; the owner supplies
+the bot token.
+
 ## Quickstart
 
 Clone the repository:

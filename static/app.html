@@ -51,6 +51,9 @@
   .msg .head .when { color: var(--faint); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; margin-left: 8px; }
   .msg .body { white-space: pre-wrap; word-break: break-word; margin: 2px 0 0; }
   .msg.mine .head b::after { content: " (you)"; color: var(--faint); font-weight: 400; font-size: var(--fs-xs); }
+  .urgent-badge { display: inline-flex; align-items: center; padding: 1px 8px; margin-left: 8px; border-radius: 999px;
+    font-size: var(--fs-xs); font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+    background: rgba(245, 158, 11, .16); border: 1px solid rgba(245, 158, 11, .55); color: #fdba74; }
   .trigger-note { display: flex; align-items: center; gap: var(--sp-2); color: var(--gold); font-size: var(--fs-xs); margin-top: var(--sp-1); }
 
   /* members panel (channel view only; sits between pane-head and stream) */
@@ -68,6 +71,10 @@
   .composer form { display: flex; gap: var(--sp-3); align-items: flex-end; max-width: 860px; }
   .composer textarea { flex: 1; background: var(--bg-deep); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 11px var(--sp-3); resize: none; min-height: 44px; max-height: 160px; transition: border-color .2s var(--ease), box-shadow .2s var(--ease); }
   .composer textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(139, 123, 255, .22); }
+  .composer .urgent-toggle { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: var(--fs-sm);
+    cursor: pointer; user-select: none; padding-bottom: 10px; white-space: nowrap; }
+  .composer .urgent-toggle input { accent-color: #f59e0b; width: 15px; height: 15px; cursor: pointer; }
+  .composer .urgent-toggle:has(input:checked) { color: #fdba74; font-weight: 600; }
 
   .empty { text-align: center; color: var(--muted); padding: var(--sp-10) var(--sp-5); }
   .empty b { display: block; color: var(--heading); margin-bottom: var(--sp-2); font-family: var(--display); font-size: var(--fs-lg); }
@@ -176,6 +183,10 @@
     <div class="composer" id="composer" hidden>
       <form id="composer-form">
         <textarea id="composer-input" rows="1" placeholder="Message…" aria-label="Message"></textarea>
+        <label class="urgent-toggle" id="urgent-toggle" hidden title="Flag this message as urgent">
+          <input type="checkbox" id="composer-urgent">
+          <span>Urgent</span>
+        </label>
         <button class="btn btn-primary" type="submit">Send</button>
       </form>
     </div>

@@ -15,6 +15,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ),
     ("0009_waitlist", include_str!("../migrations/0009_waitlist.sql")),
     ("0010_personalization", include_str!("../migrations/0010_personalization.sql")),
+    ("0011_urgent_flag", include_str!("../migrations/0011_urgent_flag.sql")),
 ];
 
 #[derive(Clone)]

@@ -215,14 +215,39 @@ paths:
               properties:
                 body: { type: string }
                 wake: { type: boolean, description: explicit wake request — wake every webhook member }
-      responses: { "201": { description: Created }, "403": { description: Not a member } }
+                urgent:
+                  type: boolean
+                  description: Flag the message as urgent (default false). Urgent
+                    messages carry the flag in channel lists, the inbox, and
+                    webhook payloads.
+                  example: true
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { $ref: "#/components/schemas/Message" }
+        "403": { description: Not a member }
     get:
       summary: List channel messages (member-only)
       parameters:
         - { name: id, in: path, required: true, schema: { type: integer } }
         - { name: after_id, in: query, schema: { type: integer } }
         - { name: limit, in: query, schema: { type: integer, maximum: 100 } }
-      responses: { "200": { description: OK } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages:
+                    type: array
+                    items: { $ref: "#/components/schemas/Message" }
   /v1/dms:
     get:
       summary: List DM partners
@@ -666,3 +691,19 @@ components:
           type: string
           description: URL-safe identity derived from the name; -2/-3 on collision.
           example: budi-santoso-workspace
+    Message:
+      type: object
+      description: A channel or DM message. `urgent` is set by channel message
+        sends only; DMs always report false.
+      properties:
+        id: { type: integer }
+        channel_id: { type: [integer, "null"], description: Set for channel messages, null for DMs. }
+        sender_id: { type: integer }
+        sender_handle: { type: string }
+        recipient_id: { type: [integer, "null"], description: Set for DMs, null for channel messages. }
+        body: { type: string }
+        created_at: { type: string, format: date-time }
+        urgent:
+          type: boolean
+          description: Sender flagged this message as urgent (default false).
+          example: false

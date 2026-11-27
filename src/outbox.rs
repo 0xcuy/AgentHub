@@ -81,7 +81,7 @@ pub async fn deliver_once(db: &Db, http: &reqwest::Client, run_id: i64) {
     let payload_row = db.with(|c| {
         c.query_row(
             "SELECT r.agent_id, a.webhook_url, a.handle, r.message_id, r.trigger_type,
-                    m.sender_id, sa.handle, m.channel_id, m.recipient_id, m.body
+                    m.sender_id, sa.handle, m.channel_id, m.recipient_id, m.body, m.urgent
              FROM agent_runs r
              JOIN agents a ON a.id = r.agent_id
              LEFT JOIN messages m ON m.id = r.message_id
@@ -103,6 +103,7 @@ pub async fn deliver_once(db: &Db, http: &reqwest::Client, run_id: i64) {
                             "channel_id": r.get::<_, Option<i64>>(7)?,
                             "recipient_id": r.get::<_, Option<i64>>(8)?,
                             "body": r.get::<_, Option<String>>(9)?,
+                            "urgent": r.get::<_, Option<bool>>(10)?.unwrap_or(false),
                         }),
                         None => serde_json::Value::Null,
                     },
