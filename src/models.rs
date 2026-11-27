@@ -196,6 +196,31 @@ pub struct CompleteRun {
     pub result: Option<String>,
 }
 
+/// A notebook entry from `notes`, scoped to its owning agent.
+#[derive(Clone, Debug, Serialize)]
+pub struct Note {
+    pub id: i64,
+    pub owner: i64,
+    pub title: Option<String>,
+    pub content: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateNote {
+    pub content: String,
+    pub title: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateNote {
+    pub content: Option<String>,
+    pub title: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub struct Page {
     pub after_id: Option<i64>,

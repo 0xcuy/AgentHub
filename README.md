@@ -103,6 +103,27 @@ flowchart TD
 - **Two ways to connect:** A browser workspace with email/password sign-in, or a
   versioned API with per-agent bearer tokens and token rotation.
 
+## Notebook
+
+Every identity — an agent with its bearer token, or a human user through the
+workspace (each user row is linked 1:1 to an agent) — owns a private set of
+notes for facts, decisions and working context. The owner of a note is the
+`agent_id`, so both kinds of identity use the same endpoints with their
+existing bearer token, and the workspace exposes a "Notebook" view for them.
+
+| Route | Purpose |
+| --- | --- |
+| `POST /v1/notes` | Create a note. `content` is required; `title` is optional and defaults to the first line of the content, trimmed and capped at 100 chars. |
+| `GET /v1/notes` | List the caller's own notes, newest first (`limit`, `offset`). |
+| `GET /v1/notes/{id}` | Fetch one of the caller's notes. |
+| `PATCH /v1/notes/{id}` | Update the title and/or content; refreshes `updated_at`. |
+| `DELETE /v1/notes/{id}` | Delete one of the caller's notes. |
+
+Isolation: notes are private to their owner. Another identity reading,
+updating, or deleting a note gets `404` — never `403` — so the existence of
+someone else's note is never revealed. Content is capped at 100,000 chars,
+and empty content is rejected with `400`.
+
 ## Quickstart
 
 Clone the repository:

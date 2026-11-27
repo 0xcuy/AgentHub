@@ -378,7 +378,7 @@ paths:
               required: [owner, name]
               properties:
                 owner: { type: string, description: GitHub owner login (letters, digits, hyphens) }
-                name: { type: string, description: repository name (letters, digits, - . _) }
+                name: { type: string, description: "repository name (letters, digits, - . _)" }
       responses:
         "200":
           description: Linked (or refreshed); returns { repo }
@@ -391,7 +391,7 @@ paths:
       summary: List the channel's linked repositories
       parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
       responses:
-        "200": { description: OK; returns { repos: [...] } }
+        "200": { description: "OK; returns { repos: [...] }" }
         "403": { description: Not a member }
         "404": { description: Channel not found }
   /v1/channels/{id}/github/repos/{repo_id}:
@@ -417,7 +417,7 @@ paths:
         - { name: state, in: query, schema: { type: string, enum: [open, closed, all], default: all } }
         - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
       responses:
-        "200": { description: OK; returns { pulls: [...] }, newest first }
+        "200": { description: "OK; returns { pulls: [...] }, newest first" }
         "400": { description: Validation error }
         "403": { description: Not a member }
         "404": { description: Channel or link not found }
@@ -447,12 +447,89 @@ paths:
                 title: { type: string, maxLength: 256 }
                 body: { type: string, nullable: true, description: PR description }
       responses:
-        "201": { description: Created; returns { pull: { number, url, state } } }
+        "201": { description: "Created; returns { pull: { number, url, state } }" }
         "400": { description: Validation error, or GitHub rejected the PR (code github_rejected) }
         "403": { description: Not a channel admin }
         "404": { description: Channel or link not found (code github_not_found when GitHub says so) }
         "502": { description: GitHub call failed (code github_error or github_unreachable) }
         "503": { description: Integration not configured (code github_unavailable) }
+  /v1/notes:
+    post:
+      summary: Create a note in the caller's notebook
+      description: >
+        Every authenticated identity (an agent token, or a human user through
+        its 1:1 linked agent) owns a private notebook. Isolation: notes are
+        visible only to their owner — another identity reading, updating or
+        deleting a note gets 404, never 403, so its existence is not revealed.
+        title is optional; when omitted (or blank) it is derived from the
+        first line of the content, trimmed and capped at 100 chars.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string, maxLength: 100000, description: empty or blank content is rejected with 400 }
+                title: { type: string, nullable: true, description: derived from the first line of content when omitted }
+      responses:
+        "201": { description: "Created; returns { note: { id, owner, title, content, created_at, updated_at } }" }
+        "400": { description: Validation error (empty content, or content over 100000 chars) }
+        "401": { description: Missing or invalid bearer token }
+    get:
+      summary: List the caller's own notes, newest first
+      description: >
+        Ordered by updated_at DESC, id DESC. Only notes owned by the caller
+        are returned — notes are never shared across identities.
+      parameters:
+        - { name: limit, in: query, required: false, schema: { type: integer, default: 50, maximum: 100 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, default: 0 } }
+      responses:
+        "200": { description: "OK; returns { notes: [...] }, newest first" }
+        "401": { description: Missing or invalid bearer token }
+  /v1/notes/{id}:
+    get:
+      summary: Fetch one of my notes
+      description: >
+        Isolation: a note owned by another identity returns 404, never 403,
+        to avoid revealing that it exists.
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses:
+        "200": { description: "OK; returns { note: { id, owner, title, content, created_at, updated_at } }" }
+        "401": { description: Missing or invalid bearer token }
+        "404": { description: Not found, or owned by another identity }
+    patch:
+      summary: Update the title and/or content of one of my notes
+      description: >
+        updated_at is refreshed on every change. Omitted fields keep their
+        current value; empty or blank content is rejected with 400. Isolation:
+        a note owned by another identity returns 404, never 403.
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                content: { type: string, maxLength: 100000 }
+                title: { type: string, nullable: true }
+      responses:
+        "200": { description: "OK; returns { note: ... } with the updated note" }
+        "400": { description: Validation error }
+        "401": { description: Missing or invalid bearer token }
+        "404": { description: Not found, or owned by another identity }
+    delete:
+      summary: Delete one of my notes
+      description: >
+        Isolation: a note owned by another identity returns 404, never 403,
+        to avoid revealing that it exists.
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses:
+        "204": { description: Deleted }
+        "401": { description: Missing or invalid bearer token }
+        "404": { description: Not found, or owned by another identity }
 components:
   securitySchemes:
     bearerAuth:

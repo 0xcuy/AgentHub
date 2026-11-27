@@ -3,7 +3,7 @@
   const state = {
     me: null,            // { email, workspace: { id, name }, agent: { id, handle, name, ..., token } }
     token: '',
-    view: null,          // { kind: 'channel'|'dm'|'inbox'|'mail'|'agents'|'runs'|'github', id?, name? }
+    view: null,          // { kind: 'channel'|'dm'|'inbox'|'mail'|'agents'|'runs'|'github'|'notes'|'note', id?, name? }
     channels: [],
     agents: [],
     dms: new Map(),      // agentId -> unread count (session-local)
@@ -481,6 +481,124 @@
     }
   }
 
+  /* ---------- notebook ---------- */
+  let notesCache = [];
+
+  function noteDay(iso) {
+    const d = new Date(iso);
+    return isNaN(d) ? 'Undated' : d.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+  }
+
+  async function showNotes() {
+    state.view = { kind: 'notes' };
+    paneTitle.textContent = 'Notebook';
+    paneSub.textContent = 'Private to your identity — nobody else can read these';
+    setComposer(false);
+    renderNav();
+    stream.innerHTML = '<div class="empty"><div class="skeleton" style="height:64px;max-width:480px;margin:auto"></div></div>';
+    try {
+      const v = await api('/v1/notes?limit=100');
+      notesCache = v.notes ?? [];
+      if (notesCache.length === 0) {
+        stream.innerHTML = `<div class="empty"><b>No notes yet</b>Anything you write here is visible only to your identity.
+          <div style="margin-top:var(--sp-4)"><button class="btn btn-primary" id="new-note">+ New note</button></div></div>`;
+      } else {
+        let lastDay = null;
+        stream.innerHTML = `<div style="display:flex;justify-content:flex-end;margin-bottom:var(--sp-3)">
+            <button class="btn btn-primary" id="new-note">+ New note</button></div>` +
+          notesCache.map((n) => {
+            const day = noteDay(n.updated_at);
+            const head = day === lastDay ? '' : `<h3 style="margin:var(--sp-4) 0 var(--sp-2)">${esc(day)}</h3>`;
+            lastDay = day;
+            return `${head}<div class="row">
+              <div class="grow" data-note-open="${n.id}" style="cursor:pointer">
+                <b>${esc(n.title || 'Untitled')}</b>
+                <p>${esc(n.content.split('\n')[0].slice(0, 120) || '(empty)')} · <span class="num">${esc(when(n.updated_at))}</span></p>
+              </div>
+              <button class="btn" data-note-del="${n.id}">Delete</button>
+            </div>`;
+          }).join('');
+      }
+      stream.querySelectorAll('[data-note-open]').forEach((el) =>
+        el.addEventListener('click', () => openNote(+el.dataset.noteOpen)));
+      stream.querySelectorAll('[data-note-del]').forEach((b) =>
+        b.addEventListener('click', () => deleteNote(+b.dataset.noteDel)));
+      $('#new-note')?.addEventListener('click', newNote);
+    } catch (e) {
+      stream.innerHTML = `<div class="empty"><b>Couldn't load notes</b>${esc(e.message)} <button class="btn" id="retry">Retry</button></div>`;
+      $('#retry')?.addEventListener('click', showNotes);
+    }
+  }
+
+  async function openNote(id) {
+    let n = notesCache.find((x) => x.id === id);
+    if (!n) {
+      try { n = (await api(`/v1/notes/${id}`)).note; } catch { showNotes(); return; }
+    }
+    state.view = { kind: 'note', id };
+    paneTitle.textContent = n.title || 'Untitled note';
+    paneSub.textContent = `Updated ${when(n.updated_at)}`;
+    setComposer(false);
+    renderNav();
+    stream.innerHTML = `
+      <form id="note-editor" style="display:grid;gap:var(--sp-3);max-width:640px;margin:var(--sp-4) auto;width:100%;padding:0 var(--sp-4)">
+        <div class="field"><label for="note-title">Title</label>
+          <input id="note-title" value="${esc(n.title ?? '')}" placeholder="Defaults to the first line of the content" autocomplete="off"></div>
+        <div class="field"><label for="note-content">Content</label>
+          <textarea id="note-content" rows="14" required>${esc(n.content)}</textarea></div>
+        <div style="display:flex;gap:var(--sp-3);align-items:center">
+          <button class="btn" type="button" id="note-back">Back</button>
+          <button class="btn btn-primary" type="submit">Save</button>
+          <span class="faint" id="note-msg" role="alert" style="min-height:1.2em"></span>
+          <span style="flex:1"></span>
+          <button class="btn" type="button" id="note-delete">Delete</button>
+        </div>
+      </form>`;
+    $('#note-back').addEventListener('click', showNotes);
+    $('#note-delete').addEventListener('click', () => deleteNote(id));
+    $('#note-editor').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const msg = $('#note-msg');
+      msg.textContent = '';
+      try {
+        await api(`/v1/notes/${id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            title: $('#note-title').value.trim() || null,
+            content: $('#note-content').value,
+          }),
+        });
+        showNotes();
+      } catch (err) {
+        msg.textContent = `Save failed: ${err.message}`;
+      }
+    });
+  }
+
+  async function newNote() {
+    try {
+      const v = await api('/v1/notes', {
+        method: 'POST',
+        body: JSON.stringify({ content: 'New note\n' }),
+      });
+      openNote(v.note.id);
+    } catch (err) {
+      stream.insertAdjacentHTML('afterbegin',
+        `<div class="empty" style="padding:var(--sp-3)" role="alert">Couldn't create note: ${esc(err.message)}</div>`);
+    }
+  }
+
+  async function deleteNote(id) {
+    const n = notesCache.find((x) => x.id === id);
+    if (!confirm(`Delete “${n?.title || 'this note'}”? This can't be undone.`)) return;
+    try {
+      await api(`/v1/notes/${id}`, { method: 'DELETE' });
+      showNotes();
+    } catch (err) {
+      alert(err.message);
+    }
+  }
+
   /* ---------- composer ---------- */
   $('#composer-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -619,7 +737,7 @@
 
     document.querySelectorAll('[data-view]').forEach((b) =>
       b.addEventListener('click', () => {
-        ({ inbox: showInbox, mail: showMail, agents: showAgents, runs: showRuns, github: showGithub })[b.dataset.view]();
+        ({ inbox: showInbox, mail: showMail, agents: showAgents, runs: showRuns, github: showGithub, notes: showNotes })[b.dataset.view]();
       }));
 
     initialLoad();
