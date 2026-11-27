@@ -55,6 +55,27 @@
   .urgent-badge { display: inline-flex; align-items: center; padding: 1px 8px; margin-left: 8px; border-radius: 999px;
     font-size: var(--fs-xs); font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
     background: rgba(245, 158, 11, .16); border: 1px solid rgba(245, 158, 11, .55); color: #fdba74; }
+  /* Reactions + read receipts: quiet glass chips under the message body. */
+  .reactions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; min-height: 30px; padding: 2px 9px;
+    font: inherit; font-size: var(--fs-xs); line-height: 1; color: var(--muted); cursor: pointer;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 999px;
+    transition: border-color .15s var(--ease), background .15s var(--ease), transform .12s var(--ease); }
+  .chip .num { font-variant-numeric: tabular-nums; color: var(--faint); }
+  .chip:hover { border-color: var(--accent); background: var(--surface-2, var(--surface)); transform: translateY(-1px); }
+  .chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .chip.mine { border-color: var(--accent); color: var(--text); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .chip.mine .num { color: var(--text); }
+  .chip.faint { opacity: .55; }
+  .chip.faint:hover { opacity: 1; }
+  .chip-add { padding: 2px 7px; font-weight: 600; }
+  .reactions .picker { display: none; gap: 6px; }
+  .reactions.open .picker { display: inline-flex; }
+  .read-by { margin-top: 6px; font-size: var(--fs-xs); color: var(--muted); }
+  .read-by.pending { color: var(--faint); }
+  @media (max-width: 480px) {
+    .chip { min-height: 34px; padding: 4px 10px; }
+  }
   .trigger-note { display: flex; align-items: center; gap: var(--sp-2); color: var(--gold); font-size: var(--fs-xs); margin-top: var(--sp-1); }
 
   /* members panel (channel view only; sits between pane-head and stream) */

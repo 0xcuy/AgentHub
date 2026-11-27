@@ -486,9 +486,13 @@ pub async fn list_messages(
              FROM messages msg JOIN agents a ON a.id = msg.sender_id
              WHERE msg.channel_id = ?1 AND (?2 = 0 OR msg.id < ?2) ORDER BY msg.id DESC LIMIT ?3",
         )?;
-        stmt.query_map(params![id, after_id, limit], map_message_row)
-            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
-            .map_err(ApiError::from)
+        let messages = stmt
+            .query_map(params![id, after_id, limit], map_message_row)
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())?;
+        let msg_ids: Vec<i64> = messages.iter().map(|m| m.id).collect();
+        let mut reactions = std::collections::HashMap::new();
+        super::reactions::attach_reactions(c, &msg_ids, agent.id, &mut reactions)?;
+        Ok(super::reactions::decorate(messages, reactions, None))
     })?;
     Ok(Json(serde_json::json!({ "messages": messages })))
 }

@@ -6,6 +6,7 @@
     view: null,          // { kind: 'channel'|'dm'|'inbox'|'mail'|'agents'|'runs'|'github'|'notes'|'note', id?, name? }
     channels: [],
     agents: [],
+    messages: [],        // messages of the open channel/DM, with reactions attached
     dms: new Map(),      // agentId -> unread count (session-local)
     // Channel members: there is no GET members endpoint, so `seen` is the set
     // of senders in loaded messages and may be incomplete. adminProven /
@@ -142,20 +143,86 @@
     paneSub.textContent = a ? a.name : '';
     setComposer(true, `Message @${a?.handle ?? ''}`);
     renderNav();
-    await loadMessages(`/v1/dms/${agentId}/messages`);
+    const items = await loadMessages(`/v1/dms/${agentId}/messages`);
+    // Opening the DM marks the partner's messages read, which is what their
+    // sender sees as "Read by @you".
+    const received = (items ?? []).filter((m) => m.sender_id === agentId).map((m) => m.id);
+    if (received.length) {
+      api('/v1/inbox/read', { method: 'POST', body: JSON.stringify({ message_ids: received }) }).catch(() => {});
+    }
+  }
+
+  // Reaction names are API values; the UI renders each as its glyph.
+  const REACTIONS = { seen: '👀', ok: '👌', done: '✅', up: '👍', down: '👎', heart: '❤️' };
+
+  function reactionsHtml(m) {
+    const list = m.reactions ?? [];
+    const chips = list.map((r) => `
+      <button class="chip${r.mine ? ' mine' : ''}" data-react="${m.id}" data-emoji="${esc(r.emoji)}"
+        aria-pressed="${r.mine ? 'true' : 'false'}" title="${esc(r.emoji)}">
+        <span aria-hidden="true">${REACTIONS[r.emoji] ?? esc(r.emoji)}</span><span class="num">${r.count}</span>
+      </button>`).join('');
+    const rest = Object.keys(REACTIONS).filter((k) => !list.some((r) => r.emoji === k));
+    const add = rest.length
+      ? `<button class="chip chip-add" data-react-add="${m.id}" aria-label="Add reaction" aria-expanded="false">+</button>
+         <span class="picker">${rest.map((k) => `
+           <button class="chip faint" data-react="${m.id}" data-emoji="${k}" title="${k}"><span aria-hidden="true">${REACTIONS[k]}</span></button>`).join('')}</span>`
+      : '';
+    return `<div class="reactions" data-reactions="${m.id}">${chips}${add}</div>`;
+  }
+
+  function readByHtml(m) {
+    if (state.view?.kind !== 'dm' || m.sender_id !== state.me.agent.id) return '';
+    const rb = m.read_by ?? [];
+    if (!rb.length) return '<div class="read-by pending">✓ Sent</div>';
+    const who = rb.map((r) => '@' + r.handle).join(', ');
+    return `<div class="read-by" title="Read ${esc(rb.map((r) => when(r.read_at)).join(', '))}">✓✓ Read by ${esc(who)}</div>`;
   }
 
   function msgHtml(m) {
     const mine = m.sender_id === state.me.agent.id;
     return `
-      <div class="msg ${mine ? 'mine' : ''}">
+      <div class="msg ${mine ? 'mine' : ''}" data-msg="${m.id}">
         ${avatarEl(m.sender_handle)}
         <div style="min-width:0">
           <div class="head"><b>${esc(m.sender_handle)}</b>${m.urgent ? '<span class="urgent-badge">urgent</span>' : ''}
             <span class="when num"> ${when(m.created_at)}</span></div>
           <p class="body">${esc(m.body)}</p>
+          ${reactionsHtml(m)}
+          ${readByHtml(m)}
         </div>
       </div>`;
+  }
+
+  async function toggleReaction(msgId, emoji) {
+    const m = state.messages.find((x) => x.id === msgId);
+    if (!m) return;
+    const isMine = (m.reactions ?? []).some((r) => r.emoji === emoji && r.mine);
+    try {
+      if (isMine) {
+        await api(`/v1/messages/${msgId}/reactions/${encodeURIComponent(emoji)}`, { method: 'DELETE' });
+        applyReaction(m, emoji, false);
+      } else {
+        await api(`/v1/messages/${msgId}/reactions`, { method: 'POST', body: JSON.stringify({ emoji }) });
+        applyReaction(m, emoji, true);
+      }
+    } catch (err) {
+      alert(err.message);
+    }
+  }
+
+  function applyReaction(m, emoji, mine) {
+    const list = m.reactions ?? (m.reactions = []);
+    const r = list.find((x) => x.emoji === emoji);
+    if (mine) {
+      if (r) { r.count += 1; r.mine = true; } else list.push({ emoji, count: 1, mine: true });
+    } else if (r) {
+      r.count -= 1;
+      r.mine = false;
+      if (r.count <= 0) m.reactions = list.filter((x) => x.emoji !== emoji);
+    }
+    const box = stream.querySelector(`[data-reactions="${m.id}"]`);
+    if (box) box.outerHTML = reactionsHtml(m);
   }
 
   async function loadMessages(url) {
@@ -163,6 +230,7 @@
     try {
       const v = await api(`${url}?limit=50`);
       const items = v.messages ?? [];
+      state.messages = items;
       if (items.length === 0) {
         stream.innerHTML = `<div class="empty"><b>No messages yet</b>Send the first one below.</div>`;
         return items;
@@ -862,6 +930,20 @@
     } catch (err) {
       alert(err.message);
     }
+  });
+
+  // Reaction chips and the "+" picker are re-rendered per message; one
+  // delegated listener covers the whole stream.
+  stream.addEventListener('click', async (e) => {
+    const addBtn = e.target.closest('[data-react-add]');
+    if (addBtn) {
+      const box = addBtn.closest('.reactions');
+      const open = box.classList.toggle('open');
+      addBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      return;
+    }
+    const chip = e.target.closest('[data-react]');
+    if (chip) await toggleReaction(+chip.dataset.react, chip.dataset.emoji);
   });
 
   $('#add-agent').addEventListener('click', openAddAgentDialog);
