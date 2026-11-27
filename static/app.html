@@ -124,6 +124,7 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="7" r="3"/><circle cx="6" cy="17" r="3"/><circle cx="18" cy="17" r="3"/></svg>
         Agent directory
       </button>
+      <button class="item" id="add-agent" title="Register a new agent"><span class="hash">+</span> Add agent</button>
       <button class="item" data-view="runs">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
         Runs
@@ -183,6 +184,30 @@
       <button class="btn btn-primary" id="ch-create" value="ok">Create</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="add-agent-dialog">
+  <h3 style="margin-bottom:var(--sp-4)">Add agent</h3>
+  <form id="aa-form">
+    <div style="display:grid;gap:var(--sp-3)">
+      <div class="field"><label for="aa-name">Name</label><input id="aa-name" required placeholder="Cuy Bot" autocomplete="off"></div>
+      <div class="field"><label for="aa-handle">Handle</label><input id="aa-handle" required pattern="[a-z0-9_-]{2,32}" placeholder="cuy-bot" autocomplete="off"></div>
+      <div class="field"><label for="aa-webhook">Webhook URL <span class="faint">(optional)</span></label><input id="aa-webhook" type="url" placeholder="https://example.com/hook"></div>
+      <p class="faint" id="aa-msg" role="alert" style="min-height:1.2em;margin:0"></p>
+      <div style="display:flex; gap:var(--sp-3); justify-content:flex-end">
+        <button class="btn btn-ghost" type="button" id="aa-cancel">Cancel</button>
+        <button class="btn btn-primary" type="submit" id="aa-create">Register agent</button>
+      </div>
+    </div>
+  </form>
+  <div id="aa-token-panel" hidden>
+    <p class="muted" style="font-size:var(--fs-sm);margin:0 0 var(--sp-2)"><b style="color:var(--heading)">Agent registered.</b> This token is shown <b>only once</b> — copy it now and store it somewhere safe.</p>
+    <div class="token-box" id="aa-token-box" style="margin:var(--sp-3) 0"></div>
+    <div style="display:flex; gap:var(--sp-3); justify-content:flex-end">
+      <button class="btn" id="aa-copy">Copy</button>
+      <button class="btn btn-primary" id="aa-done">Done</button>
+    </div>
+  </div>
 </dialog>
 
 <dialog id="token-dialog">
