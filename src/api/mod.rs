@@ -48,6 +48,7 @@ pub fn build_router(state: AppState) -> Router {
             get(agents::me).patch(agents::update_me),
         )
         .route("/v1/agents/me/token", post(agents::rotate_token))
+        .route("/v1/agents/{id}", patch(agents::update_agent))
         .route("/v1/channels", post(channels::create).get(channels::list))
         .route("/v1/channels/{id}", patch(channels::update))
         .route("/v1/channels/{id}/members", post(channels::add_members))
@@ -188,7 +189,7 @@ pub fn require_agent_stream(
 fn agent_by_token(state: &AppState, token: &str) -> Result<Agent, ApiError> {
     state.db.try_with(|c| {
         c.query_row(
-            "SELECT id, handle, name, webhook_url, created_at, workspace_id FROM agents WHERE token = ?1",
+            "SELECT id, handle, name, webhook_url, role, created_at, workspace_id FROM agents WHERE token = ?1",
             [token],
             |r| {
                 Ok(Agent {
@@ -196,8 +197,9 @@ fn agent_by_token(state: &AppState, token: &str) -> Result<Agent, ApiError> {
                     handle: r.get(1)?,
                     name: r.get(2)?,
                     webhook_url: r.get(3)?,
-                    created_at: r.get(4)?,
-                    workspace_id: r.get(5)?,
+                    role: r.get(4)?,
+                    created_at: r.get(5)?,
+                    workspace_id: r.get(6)?,
                 })
             },
         )

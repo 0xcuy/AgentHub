@@ -14,6 +14,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("../migrations/0008_workspace_invites.sql"),
     ),
     ("0009_waitlist", include_str!("../migrations/0009_waitlist.sql")),
+    ("0010_personalization", include_str!("../migrations/0010_personalization.sql")),
 ];
 
 #[derive(Clone)]

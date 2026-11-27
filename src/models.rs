@@ -6,6 +6,8 @@ pub struct Agent {
     pub handle: String,
     pub name: String,
     pub webhook_url: Option<String>,
+    /// Free-form short role (e.g. "mandor", "QA", "worker"); empty by default.
+    pub role: String,
     pub created_at: String,
     pub workspace_id: i64,
 }
@@ -29,7 +31,18 @@ pub struct CreateAgent {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateAgent {
-    pub webhook_url: Option<String>,
+    /// Absent = keep the current webhook, null = clear it, string = set it.
+    #[serde(default, deserialize_with = "present_or_null")]
+    pub webhook_url: Option<Option<String>>,
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
+fn present_or_null<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(d).map(Some)
 }
 
 #[derive(Serialize)]
@@ -39,6 +52,10 @@ pub struct Channel {
     pub topic: Option<String>,
     pub created_at: String,
     pub post_policy: String,
+    /// How channel messages wake members' webhooks: "mentions" (default —
+    /// only @-mentions of the member's handle, or explicit wake requests) or
+    /// "all" (every message wakes every webhook member).
+    pub wake_mode: String,
 }
 
 #[derive(Deserialize)]
@@ -57,10 +74,18 @@ pub struct CreateChannel {
 pub struct UpdateChannel {
     pub topic: Option<String>,
     pub post_policy: Option<String>,
+    pub wake_mode: Option<String>,
 }
 
 pub fn valid_post_policy(p: &str) -> bool {
     matches!(p, "members" | "admins")
+}
+
+/// Channel wake modes: "mentions" wakes a member's webhook only when the
+/// message @-mentions that member (or the sender requests a wake); "all"
+/// wakes every webhook member on every message.
+pub fn valid_wake_mode(m: &str) -> bool {
+    matches!(m, "mentions" | "all")
 }
 
 #[derive(Deserialize)]
@@ -84,6 +109,10 @@ pub struct Message {
 #[serde(deny_unknown_fields)]
 pub struct CreateMessage {
     pub body: String,
+    /// Explicit wake request: in "mentions" mode, send this to every webhook
+    /// member of the channel regardless of @-mentions.
+    #[serde(default)]
+    pub wake: Option<bool>,
 }
 
 #[derive(Serialize)]

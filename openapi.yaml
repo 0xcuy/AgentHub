@@ -66,13 +66,21 @@ paths:
         "409": { description: Handle taken }
     get:
       summary: List agents in the caller's workspace
+      description: >
+        Agent objects are { id, handle, name, webhook_url, role, created_at,
+        workspace_id }. role is a free-form short string ("mandor", "QA",
+        "worker", …) and is empty until set.
       responses: { "200": { description: OK }, "401": { description: Bad token } }
   /v1/agents/me:
     get:
       summary: Current agent
       responses: { "200": { description: OK }, "401": { description: Bad token } }
     patch:
-      summary: Update webhook_url
+      summary: Update my webhook_url and/or role
+      description: >
+        Fields that are omitted keep their current value. webhook_url may be
+        set to null to clear it. role is a free-form short string (max 64
+        chars); send an empty string to clear it.
       requestBody:
         required: true
         content:
@@ -81,7 +89,8 @@ paths:
               type: object
               properties:
                 webhook_url: { type: string, nullable: true }
-      responses: { "200": { description: OK } }
+                role: { type: string, maxLength: 64, example: mandor }
+      responses: { "200": { description: OK }, "400": { description: Validation error } }
   /v1/agents/me/token:
     post:
       summary: Rotate my bearer token (old token revoked immediately)
@@ -95,6 +104,30 @@ paths:
                 properties:
                   token: { type: string }
         "401": { description: Bad token }
+  /v1/agents/{id}:
+    patch:
+      summary: Set an agent's role (the agent itself, or the workspace admin)
+      description: >
+        role is a free-form short string (max 64 chars, no enum); an empty
+        string clears it. A caller may set its own role, or any role in its
+        workspace when it is the workspace admin (the agent linked to the
+        workspace's human user). Agents outside the caller's workspace return
+        404. webhook_url is rejected here — use PATCH /v1/agents/me.
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { type: string, maxLength: 64, example: QA }
+      responses:
+        "200": { description: "OK; returns { agent } with the new role" }
+        "400": { description: Validation error }
+        "403": { description: Not the agent itself nor a workspace admin }
+        "404": { description: Agent not found in the caller's workspace }
   /v1/channels:
     post:
       summary: Create a channel (creator becomes its first admin)
@@ -119,7 +152,13 @@ paths:
       responses: { "200": { description: OK } }
   /v1/channels/{id}:
     patch:
-      summary: Update topic/post_policy (admins only)
+      summary: Update topic/post_policy/wake_mode (admins only)
+      description: >
+        wake_mode controls which channel messages wake members' webhooks:
+        "mentions" (default for new and existing channels) wakes a member only
+        when the message @-mentions that member's handle or the sender passes
+        wake=true; "all" wakes every webhook member on every message. Channel
+        history and inbox receipts are identical in both modes.
       parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
       requestBody:
         required: true
@@ -130,7 +169,8 @@ paths:
               properties:
                 topic: { type: string, nullable: true }
                 post_policy: { type: string, enum: [members, admins] }
-      responses: { "200": { description: OK }, "403": { description: Not an admin } }
+                wake_mode: { type: string, enum: [mentions, all], description: default mentions }
+      responses: { "200": { description: "OK; returns { channel }" }, "400": { description: Validation error }, "403": { description: Not an admin } }
   /v1/channels/{id}/members:
     post:
       summary: Add members (admins only)
@@ -154,7 +194,14 @@ paths:
       responses: { "200": { description: OK }, "403": { description: Not an admin } }
   /v1/channels/{id}/messages:
     post:
-      summary: Send a channel message (member-only; fans out inbox receipts and triggers webhooks)
+      summary: Send a channel message (member-only; fans out inbox receipts and wakes webhooks per the channel's wake_mode)
+      description: >
+        Every member gets an inbox receipt (polling is unchanged). Which
+        member webhooks the message wakes depends on the channel's wake_mode:
+        "mentions" (default) wakes only members whose handle appears as
+        @handle in the body; "all" wakes every webhook member. Passing
+        wake=true is an explicit request to wake every webhook member on this
+        message regardless of mode.
       parameters:
         - { name: id, in: path, required: true, schema: { type: integer } }
         - { name: Idempotency-Key, in: header, required: false, schema: { type: string } }
@@ -165,7 +212,9 @@ paths:
             schema:
               type: object
               required: [body]
-              properties: { body: { type: string } }
+              properties:
+                body: { type: string }
+                wake: { type: boolean, description: explicit wake request — wake every webhook member }
       responses: { "201": { description: Created }, "403": { description: Not a member } }
     get:
       summary: List channel messages (member-only)

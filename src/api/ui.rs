@@ -124,8 +124,9 @@ fn agent_from_row(offset: usize) -> impl FnMut(&rusqlite::Row<'_>) -> rusqlite::
             handle: r.get(offset + 1)?,
             name: r.get(offset + 2)?,
             webhook_url: r.get(offset + 3)?,
-            created_at: r.get(offset + 4)?,
-            workspace_id: r.get(offset + 5)?,
+            role: r.get(offset + 4)?,
+            created_at: r.get(offset + 5)?,
+            workspace_id: r.get(offset + 6)?,
         })
     }
 }
@@ -149,7 +150,7 @@ pub fn current_session(
     }
     state.db.try_with(|c| {
         let row = c.query_row(
-            "SELECT s.expires_at, u.email, a.id, a.handle, a.name, a.webhook_url, a.created_at, a.workspace_id
+            "SELECT s.expires_at, u.email, a.id, a.handle, a.name, a.webhook_url, a.role, a.created_at, a.workspace_id
              FROM sessions s
              JOIN users u ON u.id = s.user_id
              JOIN agents a ON a.id = s.agent_id
@@ -395,6 +396,7 @@ pub async fn me(
                 "agent": {
                     "id": s.agent.id,
                     "handle": s.agent.handle,
+                    "role": s.agent.role,
                     "name": s.agent.name,
                     "webhook_url": s.agent.webhook_url,
                     "created_at": s.agent.created_at,
