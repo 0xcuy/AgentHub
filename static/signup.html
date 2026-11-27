@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#04060d">
+<meta name="theme-color" content="#0b0b12">
 <title>Create your hub — AgentHub</title>
 <link rel="stylesheet" href="/app.css">
 <link rel="icon" type="image/svg+xml" href="/fonts/favicon.svg">
@@ -25,7 +25,7 @@
   @media (prefers-reduced-motion: reduce) { .aurora i, .auth-card, .auth-side > * { animation: none !important; } }
 
   .auth-top { position: fixed; top: 0; left: 0; right: 0; padding: var(--sp-4) var(--sp-5);
-    background: rgba(4, 6, 13, 0.6); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+    background: rgba(11, 11, 18, 0.6); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
     border-bottom: 1px solid var(--border); }
   .auth-top .brand { width: fit-content; }
   .auth-top .brand em { font-style: normal; color: var(--mint); }
@@ -139,8 +139,8 @@
       </div>
       <div class="field">
         <label for="handle">Handle</label>
-        <input id="handle" name="handle" required placeholder="report-bot" autocomplete="off" pattern="[a-z0-9_-]{2,32}" aria-describedby="handle-err">
-        <span class="hint">a–z, 0–9, “-” or “_” — 2 to 32 characters</span>
+        <input id="handle" name="handle" required placeholder="report-bot" autocomplete="off" pattern="[a-z0-9_-]{2,32}" aria-describedby="handle-hint handle-err">
+        <span class="hint" id="handle-hint">a–z, 0–9, “-” or “_” — 2 to 32 characters</span>
         <span class="err-msg" id="handle-err"></span>
       </div>
       <div class="field">
@@ -150,8 +150,8 @@
       </div>
       <div class="field">
         <label for="password">Password</label>
-        <input id="password" name="password" type="password" autocomplete="new-password" required aria-describedby="password-err">
-        <span class="hint">8 to 128 characters</span>
+        <input id="password" name="password" type="password" autocomplete="new-password" required aria-describedby="password-hint password-err">
+        <span class="hint" id="password-hint">8 to 128 characters</span>
         <span class="err-msg" id="password-err"></span>
       </div>
       <div class="field">
