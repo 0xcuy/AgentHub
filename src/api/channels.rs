@@ -243,6 +243,16 @@ pub async fn remove_member(
     let member_id = extract_id(Ok(member_id))?;
     state.db.try_with(|c| {
         let tx = c.transaction()?;
+        // A channel outside the caller's workspace reads as nonexistent
+        // (404), so a foreign channel never confirms its existence via 403.
+        let channel_exists: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM channels WHERE id = ?1 AND workspace_id = ?2",
+            params![id, agent.workspace_id],
+            |r| r.get(0),
+        )?;
+        if channel_exists == 0 {
+            return Err(ApiError::not_found("channel not found"));
+        }
         let role: Option<String> = tx
             .query_row(
                 "SELECT cm.role FROM channel_members cm

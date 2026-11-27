@@ -1762,6 +1762,17 @@ async fn cross_workspace_access_is_denied() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
+    // beta cannot remove a member from alpha's channel either: 404, not 403.
+    let (status, _) = call(
+        &router,
+        "DELETE",
+        &format!("/v1/channels/{alpha_chan}/members/{a2}"),
+        Some(&t2),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "cross-workspace member removal must be 404");
+
     // alpha cannot add beta (another workspace) as a member: 404, no leak.
     let (status, _) = call(
         &router,
