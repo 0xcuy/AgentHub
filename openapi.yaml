@@ -580,6 +580,27 @@ paths:
         "200": { description: "OK; returns { invites: [ { token, workspace_id, created_by, expires_at, used_at, created_at, status: active|used|expired, link } ] }, newest first" }
         "401": { description: Missing or invalid bearer token }
         "403": { description: Caller is not the workspace admin }
+  /v1/waitlist:
+    post:
+      summary: Join the Pro waitlist (no auth)
+      description: >
+        Landing-page form endpoint: stores one email address, trimmed and
+        lowercased, with a join timestamp. Unauthenticated — anyone may
+        join. The response is byte-identical for a new email and for an
+        email already on the list, so membership is never observable.
+        Rate limiting is not applied to this endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, maxLength: 254, description: "must be a plausible email address; empty, whitespace, missing-@ and dotless-domain shapes are rejected with 400" }
+      responses:
+        "200": { description: "OK; returns { ok: true } — same body whether the email is new or already waitlisted" }
+        "400": { description: "Missing email field or invalid email shape" }
 components:
   securitySchemes:
     bearerAuth:

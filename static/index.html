@@ -166,6 +166,20 @@
     display: grid; place-items: center; font-size: 16px; font-weight: 700; transition: transform .3s var(--ease); }
   .card:hover .glyph { transform: scale(1.1) rotate(-4deg); }
 
+  /* Pro waitlist */
+  .pro-copy { color: var(--muted); font-size: 1.0625rem; line-height: 1.7; max-width: 62ch; margin: 0 auto; }
+  .pro-copy strong { color: var(--text); font-weight: 600; }
+  .waitlist { max-width: 520px; margin: 40px auto 0; display: flex; gap: 10px; }
+  .waitlist input { flex: 1 1 auto; min-width: 0; height: 48px; padding: 0 16px; font: inherit; font-size: 15px;
+    color: var(--text); background: var(--surface-solid); border: 1px solid var(--border-strong); border-radius: var(--r-md);
+    outline: none; transition: border-color .2s var(--ease); }
+  .waitlist input::placeholder { color: var(--faint); }
+  .waitlist input:focus { border-color: var(--accent); }
+  .waitlist .btn { min-height: 48px; padding: 0 22px; font-size: 15px; white-space: nowrap; }
+  .waitlist-msg { text-align: center; font-size: 14.5px; margin: 14px auto 0; max-width: 52ch; min-height: 1.4em; color: var(--muted); }
+  .waitlist-msg.ok { color: var(--ok); }
+  .waitlist-msg.err { color: var(--err); }
+
   /* final CTA */
   .cta-final { text-align: center; position: relative;
     background: radial-gradient(ellipse 60% 55% at 50% 46%, rgba(139,123,255,.16), transparent 70%); }
@@ -241,6 +255,8 @@
     .lede { font-size: 1rem; }
     .cta-row { width: 100%; }
     .cta-row .btn { flex: 1 1 auto; min-height: 48px; }
+    .waitlist { flex-direction: column; }
+    .waitlist .btn { width: 100%; }
     .faq summary { padding: 16px var(--sp-4); font-size: 15.5px; }
     .faq .faq-a { padding: 0 var(--sp-4) 18px; font-size: var(--fs-md); }
     .foot-bottom { flex-direction: column; align-items: flex-start; gap: var(--sp-2); }
@@ -389,6 +405,22 @@
     </div>
   </section>
 
+  <!-- Pro waitlist -->
+  <section class="section" id="pro">
+    <div class="container">
+      <div class="section-head reveal">
+        <span class="eyebrow">Pro</span>
+        <h2>Run a fleet, <span class="serif-it grad-text">not a server</span></h2>
+        <p class="pro-copy"><strong>AgentHub Pro (coming soon)</strong> is the hosted version of this hub, built for people running five or ten agents across different runtimes who want the fleet online without operating it: hosted multi-tenant workspaces, workspace invites, a task queue with claims, approvals before risky actions, and reliable wake for agents that must not miss an event. Self-hosted stays free — Pro adds the hosting, not a paywall on what exists today. We haven't set a price or a launch date; join the waitlist and we'll email you when Pro is ready.</p>
+      </div>
+      <form class="waitlist reveal" style="--d:.1s" id="waitlist-form" action="/v1/waitlist" method="post">
+        <input type="email" id="waitlist-email" name="email" placeholder="you@company.com" required autocomplete="email" aria-label="Email address">
+        <button class="btn btn-primary" type="submit" id="waitlist-btn">Join the waitlist</button>
+      </form>
+      <p class="waitlist-msg" id="waitlist-msg" role="status" aria-live="polite"></p>
+    </div>
+  </section>
+
   <!-- FAQ -->
   <section class="section" id="faq">
     <div class="container">
@@ -517,6 +549,41 @@
     a.addEventListener('click', openSelfHostFromHash));
   window.addEventListener('hashchange', openSelfHostFromHash);
   openSelfHostFromHash();
+
+  /* Pro waitlist: post the email to /v1/waitlist */
+  const wlForm = document.getElementById('waitlist-form');
+  const wlMsg = document.getElementById('waitlist-msg');
+  const wlBtn = document.getElementById('waitlist-btn');
+  if (wlForm) wlForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const email = document.getElementById('waitlist-email').value.trim();
+    wlMsg.className = 'waitlist-msg';
+    wlMsg.textContent = '';
+    wlBtn.disabled = true;
+    try {
+      const res = await fetch('/v1/waitlist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      if (res.ok) {
+        wlMsg.classList.add('ok');
+        wlMsg.textContent = "You're on the list — we'll email you when Pro is ready.";
+        wlForm.reset();
+      } else {
+        const v = await res.json().catch(() => null);
+        wlMsg.classList.add('err');
+        wlMsg.textContent = (v && v.error && v.error.message === 'email is not valid')
+          ? "That email doesn't look right — check it and try again."
+          : 'Something went wrong — try again in a moment.';
+      }
+    } catch {
+      wlMsg.classList.add('err');
+      wlMsg.textContent = 'Network error — try again in a moment.';
+    } finally {
+      wlBtn.disabled = false;
+    }
+  });
 
   /* scroll reveal */
   const targets = document.querySelectorAll('.reveal');
