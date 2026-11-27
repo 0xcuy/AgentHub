@@ -92,8 +92,8 @@ async fn register(router: &RouterT, handle: &str, webhook: Option<&str>) -> (i64
 }
 
 /// Human signup: 1 email = 1 workspace, with a linked agent holding the
-/// bearer token. Mirrors the real UI flow: signup sets the session cookie,
-/// then /ui/api/me returns the linked agent's bearer token.
+/// bearer token. Signup sets the session cookie and returns the new agent's
+/// token once (provisioning); /ui/api/me never re-exposes it.
 async fn signup_user(router: &RouterT, handle: &str, webhook: Option<&str>) -> (i64, String) {
     let email = format!("{handle}@example.com");
     let req = Request::builder()
@@ -977,8 +977,10 @@ async fn login_lockout_after_repeated_failures() {
         .expect("429 must carry a Retry-After header");
     assert!(retry > 0 && retry <= 15 * 60);
 
-    // a different IP is unaffected
-    let (status, _) = call_raw(
+    // a different IP using the SAME email is blocked too — the per-email
+    // guard stops a targeted attack from hopping source IPs. IP and email
+    // guards share the same fixed 15-minute window.
+    let (status, v) = call_raw(
         &router,
         "POST",
         "/ui/login",
@@ -987,13 +989,42 @@ async fn login_lockout_after_repeated_failures() {
         &[("X-Forwarded-For", "203.0.113.7")],
     )
     .await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "same email from a new IP must be blocked: {v}"
+    );
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("retry after"),
+        "429 must carry a retry hint: {v}"
+    );
+
+    // a different email from that same fresh IP is unaffected
+    let (status, _) = call_raw(
+        &router,
+        "POST",
+        "/ui/login",
+        None,
+        Some(json!({ "email": "someone-else@example.com", "password": "wrongpass" })),
+        &[("X-Forwarded-For", "203.0.113.7")],
+    )
+    .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-    // the lockout is lifted once the IP records a successful login
-    // (simulated here by the same reset the success path performs).
+    // the lockout is temporary: the window rolls over after 15 minutes and a
+    // successful login resets both counters (simulated here by the same
+    // resets the middleware and handler perform).
     state.login_throttle.reset("unknown");
+    state.login_throttle.reset("email:nobody@example.com");
     let (status, _) = call(&router, "POST", "/ui/login", None, Some(bad)).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "after reset the window starts fresh");
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "after reset the window starts fresh"
+    );
 }
 
 // --- Security fix-now: V3 per-IP limit on unauthenticated POSTs ---
@@ -2164,3 +2195,195 @@ async fn migration_backfills_legacy_rows_into_workspace_1() {
 }
 
 
+
+// --- Lens 3: terms/trust — listing auth, webhook leaks, token leak, login throttle ---
+
+#[tokio::test]
+async fn listings_require_a_bearer_token() {
+    let router = test_app("listAuth");
+    for uri in ["/v1/agents", "/v1/channels", "/v1/dms", "/v1/inbox", "/v1/notes"] {
+        let (status, v) = call(&router, "GET", uri, None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri} must not be public");
+        assert_eq!(v["error"]["code"], "unauthorized", "{uri}: {v}");
+    }
+    let (status, _) = call(&router, "GET", "/v1/agents", Some("not-a-real-token"), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "a bogus token is not auth");
+}
+
+#[tokio::test]
+async fn list_responses_never_expose_webhook_urls() {
+    let router = test_app("webhookLeak");
+    let (_owner, token) =
+        register(&router, "hook-owner", Some("https://hooks.example.com/owner-secret")).await;
+    let (_worker, _worker_token) = add_agent(
+        &router,
+        &token,
+        "hook-worker",
+        Some("https://hooks.example.com/worker-secret"),
+    )
+    .await;
+
+    // The cross-agent directory must not carry webhook configuration.
+    let (status, v) = call(&router, "GET", "/v1/agents", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let raw = v.to_string();
+    assert!(
+        !raw.contains("owner-secret") && !raw.contains("worker-secret"),
+        "listing leaks a webhook URL: {raw}"
+    );
+    assert!(!raw.contains("webhook_url"), "listing must omit the webhook_url field: {raw}");
+    let agents = v["agents"].as_array().unwrap();
+    assert_eq!(agents.len(), 2);
+    assert!(agents.iter().all(|a| a.get("webhook_url").is_none()));
+
+    // ...while the owning agent still sees its own webhook on its record.
+    let (status, v) = call(&router, "GET", "/v1/agents/me", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["agent"]["webhook_url"], "https://hooks.example.com/owner-secret");
+
+    // Channel listings have no webhook fields at all.
+    let (status, v) = call(&router, "GET", "/v1/channels", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!v.to_string().contains("webhook_url"));
+}
+
+#[tokio::test]
+async fn ui_me_never_returns_the_agent_token() {
+    let router = test_app("meToken");
+    let (_id, token) = register(&router, "me-viewer", None).await;
+    let (status, _) = call(
+        &router,
+        "POST",
+        "/ui/login",
+        None,
+        Some(json!({ "email": "me-viewer@example.com", "password": "password123" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "login must succeed");
+
+    // Login sets the session cookie; /ui/api/me is what the browser reads.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ui/login")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({ "email": "me-viewer@example.com", "password": "password123" }).to_string(),
+        ))
+        .unwrap();
+    let res = Oneshot::new(router.clone(), req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let cookie = res
+        .headers()
+        .get("set-cookie")
+        .expect("login sets the session cookie")
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let req = Request::builder()
+        .uri("/ui/api/me")
+        .header("cookie", cookie)
+        .body(Body::empty())
+        .unwrap();
+    let res = Oneshot::new(router, req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let raw = String::from_utf8_lossy(&bytes).into_owned();
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["agent"]["handle"], "me-viewer");
+    assert!(
+        v["agent"].get("token").is_none(),
+        "me must not expose a token field: {raw}"
+    );
+    assert!(
+        !raw.contains(&token),
+        "me must not contain the agent's bearer token: {raw}"
+    );
+}
+
+#[tokio::test]
+async fn login_throttle_blocks_one_email_across_ips() {
+    let router = test_app("emailThrottle");
+    let email = "lens3-target@example.com";
+    let bad = json!({ "email": email, "password": "wrongpass" });
+
+    // Five failures, each from a different IP: the per-IP guard never fires,
+    // so only the per-email guard can stop the sixth attempt.
+    for i in 0..5 {
+        let xff = format!("198.51.100.{}", i + 1);
+        let (status, _) = call_raw(
+            &router,
+            "POST",
+            "/ui/login",
+            None,
+            Some(bad.clone()),
+            &[("X-Forwarded-For", xff.as_str())],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "failure {} from a fresh IP is a plain 401",
+            i + 1
+        );
+    }
+    let (status, v) = call_raw(
+        &router,
+        "POST",
+        "/ui/login",
+        None,
+        Some(bad),
+        &[("X-Forwarded-For", "198.51.100.99")],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "per-email guard must block: {v}"
+    );
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("retry after"),
+        "429 must carry a retry hint: {v}"
+    );
+
+    // A different email from that fresh IP is unaffected.
+    let (status, _) = call_raw(
+        &router,
+        "POST",
+        "/ui/login",
+        None,
+        Some(json!({ "email": "lens3-other@example.com", "password": "wrongpass" })),
+        &[("X-Forwarded-For", "198.51.100.99")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn login_throttle_window_rolls_over_so_lockout_is_temporary() {
+    let throttle = aghub::ratelimit::LoginThrottle::new(5, std::time::Duration::from_millis(60));
+    let key = "email:owner@example.com";
+    for _ in 0..5 {
+        throttle.record_failure(key);
+    }
+    assert!(throttle.blocked_for(key).is_some(), "five failures block");
+    assert!(
+        throttle.blocked_for("email:other@example.com").is_none(),
+        "other keys unaffected"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(90)).await;
+    assert!(
+        throttle.blocked_for(key).is_none(),
+        "the block must lift when the window expires — never a permanent lockout"
+    );
+    throttle.record_failure(key);
+    assert!(
+        throttle.blocked_for(key).is_none(),
+        "a fresh window starts below the limit"
+    );
+}

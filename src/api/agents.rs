@@ -69,12 +69,24 @@ pub async fn list(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let agent = require_agent(&state, &headers)?;
+    // Explicit projection: directory listings are readable by every workspace
+    // member, so they never carry webhook configuration. Only the owning
+    // agent itself (/v1/agents/me, /v1/agents/me PUT) may see its webhook_url.
     let agents = state.db.with(|c| {
-        let mut stmt = c.prepare(&format!(
-            "SELECT {AGENT_COLS} FROM agents WHERE workspace_id = ?1 ORDER BY id"
-        ))?;
-        stmt.query_map([agent.workspace_id], map_agent_row)
-            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        let mut stmt = c.prepare(
+            "SELECT id, handle, name, created_at, workspace_id FROM agents
+             WHERE workspace_id = ?1 ORDER BY id",
+        )?;
+        stmt.query_map([agent.workspace_id], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "handle": r.get::<_, String>(1)?,
+                "name": r.get::<_, String>(2)?,
+                "created_at": r.get::<_, String>(3)?,
+                "workspace_id": r.get::<_, i64>(4)?,
+            }))
+        })
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
     })?;
     Ok(Json(serde_json::json!({ "agents": agents })))
 }
@@ -124,4 +136,118 @@ pub async fn rotate_token(
         )
     })?;
     Ok(Json(serde_json::json!({ "agent": updated, "token": token })))
+}
+
+/// GET /v1/me/export — everything the caller owns, as JSON. Every query is
+/// scoped to the caller's workspace; messages, notes and memory are narrowed
+/// further to the caller's own rows, so nothing from other members of the
+/// workspace (let alone other workspaces) is included. The bearer token is
+/// never part of an export.
+pub async fn export(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let agent = require_agent(&state, &headers)?;
+    let (id, ws) = (agent.id, agent.workspace_id);
+    let data = state.db.with(|c| {
+        let profile = c.query_row(
+            &format!("SELECT {AGENT_COLS} FROM agents WHERE id = ?1 AND workspace_id = ?2"),
+            params![id, ws],
+            map_agent_row,
+        )?;
+
+        let mut stmt = c.prepare(
+            "SELECT id, slug, name, created_at FROM workspaces
+             WHERE id = ?1
+               AND id IN (SELECT workspace_id FROM agents WHERE id = ?2)",
+        )?;
+        let workspaces = stmt
+            .query_map(params![ws, id], |r| {
+                Ok(serde_json::json!({
+                    "id": r.get::<_, i64>(0)?,
+                    "slug": r.get::<_, String>(1)?,
+                    "name": r.get::<_, String>(2)?,
+                    "created_at": r.get::<_, String>(3)?,
+                }))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut stmt = c.prepare(
+            "SELECT id, name, topic, post_policy, created_at FROM channels
+             WHERE workspace_id = ?1 ORDER BY id",
+        )?;
+        let channels = stmt
+            .query_map([ws], |r| {
+                Ok(serde_json::json!({
+                    "id": r.get::<_, i64>(0)?,
+                    "name": r.get::<_, String>(1)?,
+                    "topic": r.get::<_, Option<String>>(2)?,
+                    "post_policy": r.get::<_, String>(3)?,
+                    "created_at": r.get::<_, String>(4)?,
+                }))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut stmt = c.prepare(
+            "SELECT id, channel_id, sender_id, recipient_id, body, created_at FROM messages
+             WHERE sender_id = ?1 OR recipient_id = ?1 ORDER BY id",
+        )?;
+        let messages = stmt
+            .query_map([id], |r| {
+                Ok(serde_json::json!({
+                    "id": r.get::<_, i64>(0)?,
+                    "channel_id": r.get::<_, Option<i64>>(1)?,
+                    "sender_id": r.get::<_, i64>(2)?,
+                    "recipient_id": r.get::<_, Option<i64>>(3)?,
+                    "body": r.get::<_, String>(4)?,
+                    "created_at": r.get::<_, String>(5)?,
+                }))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut stmt = c.prepare(
+            "SELECT id, title, content, created_at, updated_at FROM notes
+             WHERE owner = ?1 ORDER BY id",
+        )?;
+        let notes = stmt
+            .query_map([id], |r| {
+                Ok(serde_json::json!({
+                    "id": r.get::<_, i64>(0)?,
+                    "title": r.get::<_, Option<String>>(1)?,
+                    "content": r.get::<_, String>(2)?,
+                    "created_at": r.get::<_, String>(3)?,
+                    "updated_at": r.get::<_, String>(4)?,
+                }))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut stmt = c.prepare(
+            "SELECT id, scope, channel_id, kind, content, tags, created_at FROM memories
+             WHERE agent_id = ?1 AND workspace_id = ?2 ORDER BY id",
+        )?;
+        let memories = stmt
+            .query_map(params![id, ws], |r| {
+                Ok(serde_json::json!({
+                    "id": r.get::<_, i64>(0)?,
+                    "scope": r.get::<_, String>(1)?,
+                    "channel_id": r.get::<_, Option<i64>>(2)?,
+                    "kind": r.get::<_, String>(3)?,
+                    "content": r.get::<_, String>(4)?,
+                    "tags": r.get::<_, String>(5)?,
+                    "created_at": r.get::<_, String>(6)?,
+                }))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(serde_json::json!({
+            "exported_at": now_iso(),
+            "profile": profile,
+            "workspaces": workspaces,
+            "channels": channels,
+            "messages": messages,
+            "notes": notes,
+            "memory": memories,
+        }))
+    })?;
+    Ok(Json(data))
 }

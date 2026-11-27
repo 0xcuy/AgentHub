@@ -281,6 +281,15 @@ pub async fn login(
     Json(req): Json<Login>,
 ) -> Result<Response, ApiError> {
     let email = req.email.trim().to_lowercase();
+    // Per-email brute-force guard on top of the per-IP throttle middleware:
+    // an attacker spreading guesses for one account across many source IPs
+    // must still hit the same limit. Same fixed 15-minute window as the IP
+    // guard, so a blocked account unlocks when the window rolls over and a
+    // successful login clears it immediately — never a permanent lockout.
+    let email_key = format!("email:{email}");
+    if let Some(retry_after) = state.login_throttle.blocked_for(&email_key) {
+        return Ok(too_many_logins(retry_after));
+    }
     let row: Option<(String, String, Agent)> = state.db.with(|c| {
         c.query_row(
             "SELECT u.password_hash, u.email, a.id, a.handle, a.name, a.webhook_url, a.created_at, a.workspace_id
@@ -301,11 +310,14 @@ pub async fn login(
         })
     })?;
     let Some((hash, stored_email, agent)) = row else {
+        state.login_throttle.record_failure(&email_key);
         return Err(ApiError::unauthorized_msg("invalid email or password"));
     };
     if !verify_password(&req.password, &hash) {
+        state.login_throttle.record_failure(&email_key);
         return Err(ApiError::unauthorized_msg("invalid email or password"));
     }
+    state.login_throttle.reset(&email_key);
 
     let session_id = gen_token();
     state.db.with(|c| {
@@ -357,9 +369,11 @@ pub async fn logout(
         .into_response())
 }
 
-/// The logged-in human's agent identity. Returns the agent's bearer token so
-/// the workspace UI can call /v1 on the agent's behalf; agents themselves
-/// keep authenticating with the bearer token directly, unchanged.
+/// The logged-in human's agent identity — metadata only. The agent's bearer
+/// token is never returned to a browser: the workspace UI authenticates its
+/// /v1 calls with this session cookie, which the server bridges to the
+/// agent's bearer token (see `main.rs`). Agents themselves keep using their
+/// bearer token directly, unchanged.
 pub async fn me(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -367,13 +381,13 @@ pub async fn me(
     match current_session(&state, &headers)? {
         None => Err(ApiError::unauthorized_msg("not signed in")),
         Some(s) => {
-            let (token, workspace_name, workspace_slug): (String, String, String) = state.db.with(|c| {
+            let (workspace_name, workspace_slug): (String, String) = state.db.with(|c| {
                 c.query_row(
-                    "SELECT a.token, w.name, w.slug FROM agents a
-                     JOIN workspaces w ON w.id = a.workspace_id
+                    "SELECT w.name, w.slug FROM workspaces w
+                     JOIN agents a ON a.workspace_id = w.id
                      WHERE a.id = ?1",
                     params![s.agent.id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )
             })?;
             Ok(Json(serde_json::json!({
@@ -384,7 +398,6 @@ pub async fn me(
                     "name": s.agent.name,
                     "webhook_url": s.agent.webhook_url,
                     "created_at": s.agent.created_at,
-                    "token": token,
                 },
                 "workspace": {
                     "id": s.agent.workspace_id,
@@ -394,6 +407,23 @@ pub async fn me(
             })))
         }
     }
+}
+
+/// 429 for the per-email login guard, same shape and Retry-After header as
+/// the per-IP throttle middleware.
+fn too_many_logins(retry_after: std::time::Duration) -> Response {
+    let secs = retry_after.as_secs().max(1);
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, secs.to_string())],
+        Json(serde_json::json!({
+            "error": {
+                "code": "rate_limited",
+                "message": format!("too many failed logins, retry after {secs}s"),
+            }
+        })),
+    )
+        .into_response()
 }
 
 fn session_response(session_id: &str, body: serde_json::Value) -> Response {
