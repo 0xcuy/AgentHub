@@ -69,6 +69,49 @@ fn valid_password(password: &str) -> bool {
     (8..=128).contains(&password.len())
 }
 
+/// URL-safe slug: lowercase, every run of non-alphanumerics becomes one
+/// hyphen, trimmed. Empty input falls back to 'workspace'.
+fn slugify(name: &str) -> String {
+    let mut slug = String::with_capacity(name.len());
+    let mut last_hyphen = true; // trims leading hyphens
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            last_hyphen = false;
+        } else if !last_hyphen {
+            slug.push('-');
+            last_hyphen = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "workspace".into()
+    } else {
+        slug
+    }
+}
+
+/// First free slug: `base`, then `base-2`, `base-3`, ...
+fn unique_slug(c: &rusqlite::Connection, base: &str) -> String {
+    let mut n = 1;
+    loop {
+        let candidate = if n == 1 { base.to_string() } else { format!("{base}-{n}") };
+        let taken: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM workspaces WHERE slug = ?1",
+                [candidate.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if taken == 0 {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 fn agent_from_row(offset: usize) -> impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
     move |r: &rusqlite::Row<'_>| {
         Ok(Agent {
@@ -77,6 +120,7 @@ fn agent_from_row(offset: usize) -> impl FnMut(&rusqlite::Row<'_>) -> rusqlite::
             name: r.get(offset + 2)?,
             webhook_url: r.get(offset + 3)?,
             created_at: r.get(offset + 4)?,
+            workspace_id: r.get(offset + 5)?,
         })
     }
 }
@@ -100,7 +144,7 @@ pub fn current_session(
     }
     state.db.try_with(|c| {
         let row = c.query_row(
-            "SELECT s.expires_at, u.email, a.id, a.handle, a.name, a.webhook_url, a.created_at
+            "SELECT s.expires_at, u.email, a.id, a.handle, a.name, a.webhook_url, a.created_at, a.workspace_id
              FROM sessions s
              JOIN users u ON u.id = s.user_id
              JOIN agents a ON a.id = s.agent_id
@@ -151,7 +195,7 @@ pub async fn signup(
     let now = now_iso();
     let expires = crate::models::now_plus(std::time::Duration::from_secs(SESSION_TTL_SECS));
 
-    let agent_id: i64 = state.db.try_with(|c| {
+    let (agent_id, workspace_id, workspace_slug): (i64, i64, String) = state.db.try_with(|c| {
         let tx = c.transaction()?;
         let agent_id: i64 = tx
             .query_row(
@@ -184,8 +228,34 @@ pub async fn signup(
             "INSERT INTO sessions (id, user_id, agent_id, created_at, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![session_id, user_id, agent_id, now, expires],
         )?;
+        // 1 email = 1 workspace: the new user gets their OWN workspace with a
+        // fresh #general where they are admin. They never join the owner's
+        // forum. Signup stays open (no approval step).
+        let ws_name = format!("{name} workspace");
+        let workspace_slug = unique_slug(&tx, &slugify(&ws_name));
+        let workspace_id: i64 = tx.query_row(
+            "INSERT INTO workspaces (owner_user_id, slug, name, created_at) VALUES (?1, ?2, ?3, ?4) RETURNING id",
+            params![user_id, workspace_slug, ws_name, now],
+            |r| r.get(0),
+        )?;
+        // The agent row had to exist before users (FK), so it took the legacy
+        // default; move it into the user's fresh workspace.
+        tx.execute(
+            "UPDATE agents SET workspace_id = ?1 WHERE id = ?2",
+            params![workspace_id, agent_id],
+        )?;
+        let channel_id: i64 = tx.query_row(
+            "INSERT INTO channels (workspace_id, name, topic, post_policy, created_at)
+             VALUES (?1, 'general', 'Workspace kamu', 'members', ?2) RETURNING id",
+            params![workspace_id, now],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO channel_members (channel_id, agent_id, joined_at, role) VALUES (?1, ?2, ?3, 'admin')",
+            params![channel_id, agent_id, now],
+        )?;
         tx.commit()?;
-        Ok(agent_id)
+        Ok((agent_id, workspace_id, workspace_slug))
     })?;
 
     let body = serde_json::json!({
@@ -193,6 +263,14 @@ pub async fn signup(
         "agent": {
             "id": agent_id, "handle": req.handle, "name": name,
             "webhook_url": req.webhook_url, "created_at": now,
+            // Same bearer token /ui/api/me returns to the cookie holder: the
+            // fresh human session can drive the linked agent immediately.
+            "token": token,
+        },
+        "workspace": {
+            "id": workspace_id,
+            "name": format!("{name} workspace"),
+            "slug": workspace_slug,
         },
     });
     Ok(session_response(&session_id, body))
@@ -205,7 +283,7 @@ pub async fn login(
     let email = req.email.trim().to_lowercase();
     let row: Option<(String, String, Agent)> = state.db.with(|c| {
         c.query_row(
-            "SELECT u.password_hash, u.email, a.id, a.handle, a.name, a.webhook_url, a.created_at
+            "SELECT u.password_hash, u.email, a.id, a.handle, a.name, a.webhook_url, a.created_at, a.workspace_id
              FROM users u JOIN agents a ON a.id = u.agent_id WHERE u.email = ?1",
             [&email],
             |r| {
@@ -289,11 +367,13 @@ pub async fn me(
     match current_session(&state, &headers)? {
         None => Err(ApiError::unauthorized_msg("not signed in")),
         Some(s) => {
-            let token: String = state.db.with(|c| {
+            let (token, workspace_name, workspace_slug): (String, String, String) = state.db.with(|c| {
                 c.query_row(
-                    "SELECT token FROM agents WHERE id = ?1",
+                    "SELECT a.token, w.name, w.slug FROM agents a
+                     JOIN workspaces w ON w.id = a.workspace_id
+                     WHERE a.id = ?1",
                     params![s.agent.id],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
             })?;
             Ok(Json(serde_json::json!({
@@ -305,6 +385,11 @@ pub async fn me(
                     "webhook_url": s.agent.webhook_url,
                     "created_at": s.agent.created_at,
                     "token": token,
+                },
+                "workspace": {
+                    "id": s.agent.workspace_id,
+                    "name": workspace_name,
+                    "slug": workspace_slug,
                 },
             })))
         }

@@ -173,7 +173,7 @@ pub fn require_agent_stream(
 fn agent_by_token(state: &AppState, token: &str) -> Result<Agent, ApiError> {
     state.db.try_with(|c| {
         c.query_row(
-            "SELECT id, handle, name, webhook_url, created_at FROM agents WHERE token = ?1",
+            "SELECT id, handle, name, webhook_url, created_at, workspace_id FROM agents WHERE token = ?1",
             [token],
             |r| {
                 Ok(Agent {
@@ -182,6 +182,7 @@ fn agent_by_token(state: &AppState, token: &str) -> Result<Agent, ApiError> {
                     name: r.get(2)?,
                     webhook_url: r.get(3)?,
                     created_at: r.get(4)?,
+                    workspace_id: r.get(5)?,
                 })
             },
         )

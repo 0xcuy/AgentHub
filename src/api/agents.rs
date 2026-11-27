@@ -5,7 +5,8 @@ use crate::models::{
 };
 use crate::state::AppState;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::HeaderMap;
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use rusqlite::params;
@@ -17,15 +18,20 @@ fn map_agent_row(r: &rusqlite::Row) -> rusqlite::Result<Agent> {
         name: r.get(2)?,
         webhook_url: r.get(3)?,
         created_at: r.get(4)?,
+        workspace_id: r.get(5)?,
     })
 }
 
-const AGENT_COLS: &str = "id, handle, name, webhook_url, created_at";
+const AGENT_COLS: &str = "id, handle, name, webhook_url, created_at, workspace_id";
 
+/// Create an agent inside the CALLER's workspace. Authentication is required:
+/// open self-registration was a cross-workspace leak. Breaking change.
 pub async fn create(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(input): Json<CreateAgent>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let caller = require_agent(&state, &headers)?;
     if input.name.trim().is_empty() {
         return Err(ApiError::bad_request("name must not be empty"));
     }
@@ -41,10 +47,10 @@ pub async fn create(
         .with(|c| {
             c.query_row(
                 &format!(
-                    "INSERT INTO agents (handle, name, token, webhook_url, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5) RETURNING {AGENT_COLS}"
+                    "INSERT INTO agents (handle, name, token, webhook_url, created_at, workspace_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING {AGENT_COLS}"
                 ),
-                params![input.handle, input.name.trim(), token, input.webhook_url, now],
+                params![input.handle, input.name.trim(), token, input.webhook_url, now, caller.workspace_id],
                 map_agent_row,
             )
         })
@@ -58,10 +64,16 @@ pub async fn create(
     Ok((StatusCode::CREATED, Json(serde_json::json!({ "agent": agent, "token": token }))))
 }
 
-pub async fn list(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+pub async fn list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let agent = require_agent(&state, &headers)?;
     let agents = state.db.with(|c| {
-        let mut stmt = c.prepare(&format!("SELECT {AGENT_COLS} FROM agents ORDER BY id"))?;
-        stmt.query_map([], map_agent_row)
+        let mut stmt = c.prepare(&format!(
+            "SELECT {AGENT_COLS} FROM agents WHERE workspace_id = ?1 ORDER BY id"
+        ))?;
+        stmt.query_map([agent.workspace_id], map_agent_row)
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
     })?;
     Ok(Json(serde_json::json!({ "agents": agents })))

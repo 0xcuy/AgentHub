@@ -57,9 +57,9 @@ pub async fn create(
         .with(|c| {
             c.query_row(
                 &format!(
-                    "INSERT INTO channels (name, topic, post_policy, created_at) VALUES (?1, ?2, ?3, ?4) RETURNING {CHANNEL_COLS}"
+                    "INSERT INTO channels (workspace_id, name, topic, post_policy, created_at) VALUES (?1, ?2, ?3, ?4, ?5) RETURNING {CHANNEL_COLS}"
                 ),
-                params![input.name.trim(), input.topic, post_policy, now],
+                params![agent.workspace_id, input.name.trim(), input.topic, post_policy, now],
                 map_channel_row,
             )
         })
@@ -70,12 +70,24 @@ pub async fn create(
                 e.into()
             }
         })?;
-    state.db.with(|c| {
+    state.db.try_with(|c| {
         let mut members = vec![agent.id];
         members.extend(input.member_ids.iter().copied());
         members.sort();
         members.dedup();
         for member_id in members {
+            if member_id != agent.id {
+                // Only agents of the caller's workspace may be added: a
+                // foreign agent id must not reveal the channel's existence.
+                let same_ws: i64 = c.query_row(
+                    "SELECT COUNT(*) FROM agents WHERE id = ?1 AND workspace_id = ?2",
+                    params![member_id, agent.workspace_id],
+                    |r| r.get(0),
+                )?;
+                if same_ws == 0 {
+                    return Err(ApiError::not_found("agent not found"));
+                }
+            }
             let role = if member_id == agent.id { "admin" } else { "member" };
             c.execute(
                 "INSERT INTO channel_members (channel_id, agent_id, joined_at, role) VALUES (?1, ?2, ?3, ?4)",
@@ -87,10 +99,16 @@ pub async fn create(
     Ok((StatusCode::CREATED, Json(serde_json::json!({ "channel": channel }))))
 }
 
-pub async fn list(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+pub async fn list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let agent = require_agent(&state, &headers)?;
     let channels = state.db.with(|c| {
-        let mut stmt = c.prepare(&format!("SELECT {CHANNEL_COLS} FROM channels ORDER BY id"))?;
-        stmt.query_map([], map_channel_row)
+        let mut stmt = c.prepare(&format!(
+            "SELECT {CHANNEL_COLS} FROM channels WHERE workspace_id = ?1 ORDER BY id"
+        ))?;
+        stmt.query_map([agent.workspace_id], map_channel_row)
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
     })?;
     Ok(Json(serde_json::json!({ "channels": channels })))
@@ -111,9 +129,21 @@ pub async fn update(
     }
     state.db.try_with(|c| {
         let tx = c.transaction()?;
+        // Workspace scoping: a channel from another workspace reads as
+        // nonexistent (404), like every other channel surface. Only then is
+        // the admin check applied (403 for same-workspace non-admins).
+        let in_workspace: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM channels WHERE id = ?1 AND workspace_id = ?2",
+            params![id, agent.workspace_id],
+            |r| r.get(0),
+        )?;
+        if in_workspace == 0 {
+            return Err(ApiError::not_found("channel not found"));
+        }
         let role: Option<String> = tx
             .query_row(
-                "SELECT role FROM channel_members WHERE channel_id = ?1 AND agent_id = ?2",
+                "SELECT cm.role FROM channel_members cm
+                 WHERE cm.channel_id = ?1 AND cm.agent_id = ?2",
                 params![id, agent.id],
                 |r| r.get(0),
             )
@@ -160,7 +190,14 @@ pub async fn add_members(
     let now = now_iso();
     state.db.try_with(|c| {
         let tx = c.transaction()?;
-        if tx.query_row("SELECT COUNT(*) FROM channels WHERE id = ?1", [id], |r| r.get::<_, i64>(0))? == 0 {
+        // Channel must exist in the caller's workspace, and the caller must be
+        // its admin. Cross-workspace channels read as nonexistent (404).
+        let channel_exists: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM channels WHERE id = ?1 AND workspace_id = ?2",
+            params![id, agent.workspace_id],
+            |r| r.get(0),
+        )?;
+        if channel_exists == 0 {
             return Err(ApiError::not_found("channel not found"));
         }
         let role: Option<String> = tx
@@ -175,12 +212,13 @@ pub async fn add_members(
         }
         for member_id in &input.agent_ids {
             let exists: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM agents WHERE id = ?1",
-                [member_id],
+                "SELECT COUNT(*) FROM agents WHERE id = ?1 AND workspace_id = ?2",
+                params![member_id, agent.workspace_id],
                 |r| r.get(0),
             )?;
             if exists == 0 {
-                return Err(ApiError::bad_request(format!("agent {member_id} does not exist")));
+                // Never leak that an agent of another workspace exists.
+                return Err(ApiError::not_found("agent not found"));
             }
         }
         for member_id in &input.agent_ids {
@@ -205,10 +243,22 @@ pub async fn remove_member(
     let member_id = extract_id(Ok(member_id))?;
     state.db.try_with(|c| {
         let tx = c.transaction()?;
+        // A channel outside the caller's workspace reads as nonexistent
+        // (404), so a foreign channel never confirms its existence via 403.
+        let channel_exists: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM channels WHERE id = ?1 AND workspace_id = ?2",
+            params![id, agent.workspace_id],
+            |r| r.get(0),
+        )?;
+        if channel_exists == 0 {
+            return Err(ApiError::not_found("channel not found"));
+        }
         let role: Option<String> = tx
             .query_row(
-                "SELECT role FROM channel_members WHERE channel_id = ?1 AND agent_id = ?2",
-                params![id, agent.id],
+                "SELECT cm.role FROM channel_members cm
+                 JOIN channels ch ON ch.id = cm.channel_id
+                 WHERE cm.channel_id = ?1 AND cm.agent_id = ?2 AND ch.workspace_id = ?3",
+                params![id, agent.id, agent.workspace_id],
                 |r| r.get(0),
             )
             .optional()?;
@@ -266,8 +316,8 @@ pub async fn send_message(
         let row: (String, Option<String>) = match tx.query_row(
             "SELECT post_policy,
                     (SELECT role FROM channel_members WHERE channel_id = ?1 AND agent_id = ?2)
-             FROM channels WHERE id = ?1",
-            params![id, agent.id],
+             FROM channels WHERE id = ?1 AND workspace_id = ?3",
+            params![id, agent.id, agent.workspace_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         ) {
             Ok(v) => v,
@@ -356,14 +406,27 @@ pub async fn list_messages(
     let agent = require_agent(&state, &headers)?;
     let id = extract_id(Ok(id))?;
     let (after_id, limit, _) = page_params(&page);
-    let messages = state.db.with(|c| {
+    let messages = state.db.try_with(|c| {
         let is_member: i64 = c.query_row(
-            "SELECT COUNT(*) FROM channel_members WHERE channel_id = ?1 AND agent_id = ?2",
-            params![id, agent.id],
+            "SELECT COUNT(*) FROM channel_members cm
+             JOIN channels ch ON ch.id = cm.channel_id
+             WHERE cm.channel_id = ?1 AND cm.agent_id = ?2 AND ch.workspace_id = ?3",
+            params![id, agent.id, agent.workspace_id],
             |r| r.get(0),
         )?;
         if is_member == 0 {
-            return Err(rusqlite::Error::QueryReturnedNoRows);
+            // Another workspace's channel reads as nonexistent (404); a
+            // same-workspace non-member gets the historical 403.
+            let exists: i64 = c.query_row(
+                "SELECT COUNT(*) FROM channels WHERE id = ?1 AND workspace_id = ?2",
+                params![id, agent.workspace_id],
+                |r| r.get(0),
+            )?;
+            return Err(if exists == 0 {
+                ApiError::not_found("channel not found")
+            } else {
+                ApiError::forbidden()
+            });
         }
         let mut stmt = c.prepare(
             "SELECT msg.id, msg.channel_id, msg.sender_id, a.handle, msg.recipient_id, msg.body, msg.created_at
@@ -372,9 +435,7 @@ pub async fn list_messages(
         )?;
         stmt.query_map(params![id, after_id, limit], map_message_row)
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
-    }).map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => ApiError::forbidden(),
-        other => other.into(),
+            .map_err(ApiError::from)
     })?;
     Ok(Json(serde_json::json!({ "messages": messages })))
 }

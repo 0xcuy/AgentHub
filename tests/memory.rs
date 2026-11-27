@@ -70,16 +70,56 @@ async fn call(
 }
 
 async fn register(router: &RouterT, handle: &str) -> (i64, String) {
+    signup_user(router, handle).await
+}
+
+/// Add another agent to the CALLER's workspace via the authenticated
+/// POST /v1/agents. The new agent's workspace is always the caller's.
+async fn add_agent(router: &RouterT, owner_token: &str, handle: &str) -> (i64, String) {
     let (status, v) = call(
         router,
         "POST",
         "/v1/agents",
-        None,
+        Some(owner_token),
         Some(json!({ "name": handle, "handle": handle })),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "register failed: {v}");
+    assert_eq!(status, StatusCode::CREATED, "agent create failed: {v}");
     (v["agent"]["id"].as_i64().unwrap(), v["token"].as_str().unwrap().to_string())
+}
+
+/// Human signup: 1 email = 1 workspace, with a linked agent holding the
+/// bearer token. Mirrors the real UI flow: signup sets the session cookie,
+/// then /ui/api/me returns the linked agent's bearer token.
+async fn signup_user(router: &RouterT, handle: &str) -> (i64, String) {
+    let email = format!("{handle}@example.com");
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ui/signup")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "email": email,
+                "password": "password123",
+                "handle": handle,
+                "name": handle,
+                "webhook_url": null,
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let res = Oneshot::new(router.clone(), req).await.unwrap();
+    let status = res.status();
+    assert!(
+        res.headers().get("set-cookie").is_some(),
+        "signup must set the session cookie"
+    );
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert_eq!(status, StatusCode::OK, "signup failed: {v}");
+    let agent = v["agent"]["id"].as_i64().unwrap();
+    let token = v["agent"]["token"].as_str().unwrap().to_string();
+    (agent, token)
 }
 
 async fn make_channel(
@@ -114,7 +154,7 @@ async fn remember(
 async fn memory_crud_and_source_fields() {
     let router = test_app("crud");
     let (_a, t1) = register(&router, "alpha").await;
-    let chan = make_channel(&router, &t1, "general", vec![]).await;
+    let chan = make_channel(&router, &t1, "catatan", vec![]).await;
     let (status, v) = call(
         &router,
         "POST",
@@ -224,8 +264,9 @@ async fn memory_privacy() {
 async fn memory_channel_visibility() {
     let router = test_app("channel");
     let (a1, t1) = register(&router, "alpha").await;
-    let (a2, t2) = register(&router, "beta").await;
-    let (a3, t3) = register(&router, "gamma").await;
+    // beta and gamma share alpha's workspace (signups each get their own).
+    let (a2, t2) = add_agent(&router, &t1, "beta").await;
+    let (a3, t3) = add_agent(&router, &t1, "gamma").await;
 
     let proj = make_channel(&router, &t1, "proj", vec![a1, a2]).await;
     let other = make_channel(&router, &t2, "other", vec![a2, a3]).await;
@@ -628,4 +669,132 @@ async fn memory_recall_min_score_env_var() {
     let (status, v) = call(&router2, "GET", "/v1/memory?query=suka+kopi+banget", Some(&t2), None).await;
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(v["memories"].as_array().unwrap().len(), 2, "lenient cutoff must keep both (0.2582 and 0.1443): {v}");
+}
+
+// --- workspace isolation regressions ---
+
+#[tokio::test]
+async fn cross_workspace_channel_memory_create_and_delete_are_404() {
+    let (router, _state) = test_app_with_state("xws-chan-mem");
+    let (_a1, t1) = register(&router, "alpha").await;
+    let (_a2, t2) = register(&router, "beta").await;
+    let alpha_chan = make_channel(&router, &t1, "catatan", vec![]).await;
+
+    // beta addressing alpha's channel reads as 404, never a 403 that would
+    // confirm the channel exists.
+    let (status, v) = call(
+        &router,
+        "POST",
+        "/v1/memory",
+        Some(&t2),
+        Some(json!({ "content": "intrusion", "kind": "fakta", "scope": "channel", "channel_id": alpha_chan })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "foreign channel must read as nonexistent: {v}");
+
+    // alpha stores a channel memory; beta cannot delete it either.
+    let (status, v) = call(
+        &router,
+        "POST",
+        "/v1/memory",
+        Some(&t1),
+        Some(json!({ "content": "team secret", "kind": "fakta", "scope": "channel", "channel_id": alpha_chan })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    let mem_id = v["memory"]["id"].as_i64().unwrap();
+    let (status, _) = call(&router, "DELETE", &format!("/v1/memory/{mem_id}"), Some(&t2), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "cross-workspace delete must be 404");
+}
+
+#[tokio::test]
+async fn memory_source_ids_are_workspace_scoped() {
+    let (router, _state) = test_app_with_state("xws-source-ids");
+    let (_a1, t1) = register(&router, "alpha").await;
+    let (_a2, t2) = register(&router, "beta").await;
+    let alpha_chan = make_channel(&router, &t1, "catatan", vec![]).await;
+
+    // alpha posts a channel message; beta references it as a memory source.
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{alpha_chan}/messages"),
+        Some(&t1),
+        Some(json!({ "body": "secret in channel" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    let chan_msg = v["message"]["id"].as_i64().unwrap();
+
+    let (status, v) = remember(
+        &router,
+        &t2,
+        json!({ "content": "steal", "kind": "fakta", "source_message_id": chan_msg }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "foreign message id must read as nonexistent: {v}");
+    let (status, v) = remember(
+        &router,
+        &t2,
+        json!({ "content": "steal", "kind": "fakta", "source_channel_id": alpha_chan }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "foreign channel id must read as nonexistent: {v}");
+
+    // unknown ids still answer 400 (not-found vs malformed stays distinct).
+    let (status, _) = remember(&router, &t2, json!({ "content": "x", "kind": "fakta", "source_message_id": 99999 })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = remember(&router, &t2, json!({ "content": "x", "kind": "fakta", "source_channel_id": 99999 })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // the caller's own channel message is still accepted.
+    let (status, v) = remember(
+        &router,
+        &t1,
+        json!({ "content": "own source", "kind": "fakta", "source_message_id": chan_msg }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "own workspace source must work: {v}");
+    assert_eq!(v["memory"]["source_message_id"].as_i64(), Some(chan_msg));
+}
+
+#[tokio::test]
+async fn created_memories_carry_the_callers_workspace_id() {
+    let (router, state) = test_app_with_state("mem-ws-id");
+    let (_a1, t1) = register(&router, "alpha").await;
+    let (_a2, t2) = register(&router, "beta").await;
+
+    let (status, _) = remember(&router, &t1, json!({ "content": "alpha note", "kind": "fakta" })).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = remember(&router, &t2, json!({ "content": "beta note", "kind": "fakta" })).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // The memory's workspace_id must equal its agent's workspace_id (ids
+    // themselves are not fixed: the 0006 backfill owns workspace 1, so
+    // signups start at 2 depending on the database).
+    let stored: Vec<(i64, i64)> = state
+        .db
+        .with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT m.agent_id, m.workspace_id FROM memories m
+                 LEFT JOIN agents a ON a.id = m.agent_id
+                 WHERE a.id IS NULL OR a.workspace_id <> m.workspace_id
+                 UNION ALL SELECT 0, 0 FROM memories",
+            )?;
+            let mismatches = stmt
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(mismatches)
+        })
+        .unwrap();
+    assert_eq!(
+        stored,
+        vec![(0, 0), (0, 0)],
+        "every memory must store exactly its agent's workspace_id"
+    );
+    let n: i64 = state
+        .db
+        .with(|c| c.query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0)))
+        .unwrap();
+    assert_eq!(n, 2, "both memories must exist");
 }

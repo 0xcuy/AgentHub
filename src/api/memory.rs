@@ -25,7 +25,9 @@ const MEMORY_COLS: &str = "m.id, m.agent_id, a.handle, m.scope, m.channel_id, m.
 fn visibility_where() -> &'static str {
     "(m.scope = 'private' AND m.agent_id = ?1 \
      OR m.scope = 'channel' AND m.channel_id IN \
-     (SELECT channel_id FROM channel_members WHERE agent_id = ?1))"
+     (SELECT cm.channel_id FROM channel_members cm
+      JOIN channels ch ON ch.id = cm.channel_id
+      WHERE cm.agent_id = ?1 AND ch.workspace_id = ?2))"
 }
 
 fn map_memory_row(r: &rusqlite::Row) -> rusqlite::Result<Memory> {
@@ -142,9 +144,14 @@ pub async fn create(
                 |r| r.get(0),
             )?;
             if member == 0 {
-                // Distinguish 404 (no such channel) from 403 (not a member).
-                let exists: i64 = tx
-                    .query_row("SELECT COUNT(*) FROM channels WHERE id = ?1", [cid], |r| r.get(0))?;
+                // Distinguish 404 (no such channel in this workspace) from
+                // 403 (not a member). Other workspaces' channels read as
+                // nonexistent so their existence never leaks.
+                let exists: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM channels WHERE id = ?1 AND workspace_id = ?2",
+                    rusqlite::params![cid, agent.workspace_id],
+                    |r| r.get(0),
+                )?;
                 if exists == 0 {
                     return Err(ApiError::not_found("channel not found"));
                 }
@@ -159,6 +166,23 @@ pub async fn create(
             if exists == 0 {
                 return Err(ApiError::bad_request("source_message_id does not exist"));
             }
+            // Workspace scoping: a foreign-workspace message id reads as
+            // nonexistent (404) so ids from other workspaces cannot be probed.
+            let in_workspace: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM messages m
+                 WHERE m.id = ?1
+                   AND ((m.channel_id IS NOT NULL AND EXISTS (
+                           SELECT 1 FROM channels ch
+                           WHERE ch.id = m.channel_id AND ch.workspace_id = ?2))
+                        OR (m.channel_id IS NULL AND EXISTS (
+                           SELECT 1 FROM agents sa
+                           WHERE sa.id = m.sender_id AND sa.workspace_id = ?2)))",
+                rusqlite::params![mid, agent.workspace_id],
+                |r| r.get(0),
+            )?;
+            if in_workspace == 0 {
+                return Err(ApiError::not_found("source_message_id not found"));
+            }
         }
         if let Some(cid) = input.source_channel_id {
             let exists: i64 = tx
@@ -166,13 +190,21 @@ pub async fn create(
             if exists == 0 {
                 return Err(ApiError::bad_request("source_channel_id does not exist"));
             }
+            let in_workspace: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM channels WHERE id = ?1 AND workspace_id = ?2",
+                rusqlite::params![cid, agent.workspace_id],
+                |r| r.get(0),
+            )?;
+            if in_workspace == 0 {
+                return Err(ApiError::not_found("source_channel_id not found"));
+            }
         }
         let id: i64 = tx.query_row(
             "INSERT INTO memories
-               (agent_id, scope, channel_id, kind, content, tags, source_message_id, source_channel_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) RETURNING id",
+               (agent_id, workspace_id, scope, channel_id, kind, content, tags, source_message_id, source_channel_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) RETURNING id",
             rusqlite::params![
-                agent.id, scope, channel_id, input.kind, content, tags_json,
+                agent.id, agent.workspace_id, scope, channel_id, input.kind, content, tags_json,
                 input.source_message_id, input.source_channel_id, now
             ],
             |r| r.get(0),
@@ -248,8 +280,9 @@ pub async fn search(
     // Shared WHERE: visibility plus optional filters. Placeholders are
     // numbered (`?N`) and pushed together with their values so the SQL and
     // the parameter list stay in sync for every filter combination.
+    // visibility_where() binds ?1 = agent_id, ?2 = workspace_id.
     let mut filters = String::new();
-    let mut vals: Vec<SqlValue> = vec![agent.id.into()];
+    let mut vals: Vec<SqlValue> = vec![agent.id.into(), agent.workspace_id.into()];
     if let Some(kind) = &q.kind {
         vals.push(kind.clone().into());
         filters.push_str(&format!(" AND m.kind = ?{}", vals.len()));
@@ -455,9 +488,22 @@ pub async fn delete(
                 return Err(ApiError::not_found("memory not found"));
             }
         } else {
+            // Channel memory: the channel must be in the caller's workspace —
+            // otherwise the memory reads as nonexistent (404, never a 403 that
+            // would confirm existence to another workspace).
+            let in_workspace: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM channels WHERE id = ?1 AND workspace_id = ?2",
+                rusqlite::params![channel_id, agent.workspace_id],
+                |r| r.get(0),
+            )?;
+            if in_workspace == 0 {
+                return Err(ApiError::not_found("memory not found"));
+            }
             let member: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM channel_members WHERE channel_id = ?1 AND agent_id = ?2",
-                rusqlite::params![channel_id, agent.id],
+                "SELECT COUNT(*) FROM channel_members cm
+                 JOIN channels ch ON ch.id = cm.channel_id
+                 WHERE cm.channel_id = ?1 AND cm.agent_id = ?2 AND ch.workspace_id = ?3",
+                rusqlite::params![channel_id, agent.id, agent.workspace_id],
                 |r| r.get(0),
             )?;
             if owner_id != agent.id && member == 0 {
