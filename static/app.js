@@ -10,6 +10,8 @@
     dms: new Map(),      // agentId -> unread count (session-local)
     messages: [],        // messages of the open channel/DM, oldest first
     replyTo: null,       // { id, handle, body } of the message being replied to
+    seenMsgs: new Set(), // message ids already animated — re-renders must not replay entrances
+    navEntered: false,   // sidebar cascade plays once per boot, not on every renderNav
     // Channel members: there is no GET members endpoint, so `seen` is the set
     // of senders in loaded messages and may be incomplete. adminProven /
     // adminDisabled are session-wide and set only by real API outcomes.
@@ -43,6 +45,10 @@
   function avatarEl(name, cls = 'avatar') {
     return `<span class="${cls}" aria-hidden="true">${esc(initials(name))}</span>`;
   }
+  /* entrance cascade: nodes entering the DOM get class "enter" plus a --d
+     stagger delay (capped — long lists must not take seconds to finish);
+     the animation itself lives in app.css (.enter / enterRise) */
+  const stag = (i) => Math.min(i, 10) * 40;
 
   async function api(path, opts = {}) {
     const res = await fetch(path, {
@@ -63,18 +69,24 @@
 
   /* ---------- sidebar ---------- */
   function renderNav() {
+    /* the sidebar cascade plays once per boot: re-renders on every view
+       switch must not replay it, or navigation would feel like a strobe */
+    const boot = !state.navEntered;
+    const enterCls = (base) => boot ? `${base} enter` : base;
+    const enterDly = (i) => boot ? ` style="--d:${stag(i)}ms"` : '';
     const chList = $('#channel-list');
-    chList.innerHTML = state.channels.map((c) => `
-      <button class="item ${isActive('channel', c.id)}" data-channel="${c.id}">
+    chList.innerHTML = state.channels.map((c, i) => `
+      <button class="${enterCls(`item ${isActive('channel', c.id)}`)}"${enterDly(i)} data-channel="${c.id}">
         <span class="hash">#</span> ${esc(c.name)}
       </button>`).join('');
 
     const dmList = $('#dm-list');
-    const partners = state.agents.filter((a) => a.id !== state.me.agent.id);
+    const meId = state.me?.agent?.id; // absent while the boot identity is broken
+    const partners = state.agents.filter((a) => a.id !== meId);
     dmList.innerHTML = partners.length === 0
       ? `<p class="faint" style="margin:4px 12px;font-size:var(--fs-xs)">No other agents yet.</p>`
-      : partners.map((a) => `
-      <button class="item ${isActive('dm', a.id)}" data-dm="${a.id}">
+      : partners.map((a, i) => `
+      <button class="${enterCls(`item ${isActive('dm', a.id)}`)}"${enterDly(state.channels.length + i)} data-dm="${a.id}">
         <span class="presence" title="registered"></span> ${esc(a.handle)}
       </button>`).join('');
 
@@ -82,6 +94,7 @@
       b.addEventListener('click', () => showChannel(+b.dataset.channel)));
     dmList.querySelectorAll('[data-dm]').forEach((b) =>
       b.addEventListener('click', () => showDm(+b.dataset.dm)));
+    state.navEntered = true;
   }
   function isActive(kind, id) {
     return state.view?.kind === kind && state.view.id === id ? 'active' : '';
@@ -100,6 +113,7 @@
 
   async function showChannel(id) {
     state.view = { kind: 'channel', id };
+    state.seenMsgs.clear(); // entering a conversation replays the entrance cascade
     const ch = state.channels.find((c) => c.id === id);
     paneTitle.textContent = `# ${ch?.name ?? ''}`;
     paneSub.innerHTML = ch
@@ -141,6 +155,7 @@
 
   async function showDm(agentId) {
     state.view = { kind: 'dm', id: agentId };
+    state.seenMsgs.clear(); // entering a conversation replays the entrance cascade
     const a = state.agents.find((x) => x.id === agentId);
     paneTitle.textContent = a ? `@ ${a.handle}` : 'Direct message';
     paneSub.textContent = a ? a.name : '';
@@ -203,14 +218,14 @@
       aria-label="Task status for @${esc(m.sender_handle)}'s message">${buttons}</span>`;
   }
 
-  function msgHtml(m) {
+  function msgHtml(m, enterDelay) {
     const mine = m.sender_id === state.me.agent.id;
     const status = m.task_status
       ? `<span class="status-badge ${esc(m.task_status)}">${esc(m.task_status)}</span>` : '';
     const edited = m.edited_at
       ? `<span class="edited-marker" title="Edited ${esc(when(m.edited_at))}">edited</span>` : '';
     return `
-      <div class="msg ${mine ? 'mine' : ''}" data-msg-id="${m.id}">
+      <div class="msg${mine ? ' mine' : ''}${enterDelay != null ? ' enter' : ''}"${enterDelay != null ? ` style="--d:${enterDelay}ms"` : ''} data-msg-id="${m.id}">
         ${avatarEl(m.sender_handle)}
         <div style="min-width:0;flex:1">
           <div class="head"><b>${esc(m.sender_handle)}</b>${m.urgent ? '<span class="urgent-badge">urgent</span>' : ''}${status}${edited}
@@ -270,7 +285,17 @@
   }
 
   function renderMessages() {
-    stream.innerHTML = state.messages.map(msgHtml).join('');
+    /* animated message entry: only messages never rendered before get the
+       entrance cascade. View switches clear seenMsgs so the cascade replays
+       per conversation; plain re-renders (edit, reaction, status) reuse ids
+       already in the set and nothing flashes. After a send, exactly one id —
+       the new message — is unseen, so it alone rises in. */
+    let fresh = 0;
+    stream.innerHTML = state.messages.map((m) => {
+      const d = state.seenMsgs.has(m.id) ? null : stag(fresh++);
+      return msgHtml(m, d);
+    }).join('');
+    state.messages.forEach((m) => state.seenMsgs.add(m.id));
   }
 
   async function loadMessages(url) {
@@ -323,8 +348,8 @@
       } else {
         stream.innerHTML = `<div style="display:flex;justify-content:flex-end;margin-bottom:var(--sp-3)">
             <button class="btn" id="mark-all">Mark all read</button></div>` +
-          items.map((i) => `
-          <div class="msg ${i.read_at ? '' : 'unread-row'}">
+          items.map((i, x) => `
+          <div class="msg enter ${i.read_at ? '' : 'unread-row'}" style="--d:${stag(x)}ms">
             ${avatarEl(i.message.sender_handle)}
             <div style="min-width:0;flex:1">
               <div class="head"><b>${esc(i.message.sender_handle)}</b>
@@ -362,11 +387,11 @@
       const v = await api('/v1/mail?limit=50');
       const items = v.mail ?? [];
       if (items.length === 0) {
-        stream.innerHTML = `<div class="empty"><b>No mail</b>Send with “subject | body” in the composer.</div>`;
+        stream.innerHTML = `<div class="empty"><b>No mail</b>Pick a recipient, write a subject and send below.</div>`;
         return;
       }
-      stream.innerHTML = items.map((m) => `
-        <div class="msg">
+      stream.innerHTML = items.map((m, x) => `
+        <div class="msg enter" style="--d:${stag(x)}ms">
           ${avatarEl(m.sender_handle)}
           <div style="min-width:0;flex:1">
             <div class="head"><b>${esc(m.subject)}</b>
@@ -392,8 +417,8 @@
       paneSub.textContent = `${state.agents.length} registered`;
       stream.innerHTML = `<div style="display:flex;justify-content:flex-end;margin-bottom:var(--sp-3)">
           <button class="btn btn-primary" id="agents-add">+ Add agent</button></div>` +
-        state.agents.map((a) => `
-        <div class="row">
+        state.agents.map((a, x) => `
+        <div class="row enter" style="--d:${stag(x)}ms">
           ${avatarEl(a.handle)}
           <div class="grow"><b>${esc(a.name)}</b> <span class="muted mono">@${esc(a.handle)}</span>
             ${a.role ? `<span class="badge">${esc(a.role)}</span>` : ''}
@@ -494,8 +519,8 @@
       const items = v.runs ?? [];
       stream.innerHTML = items.length === 0
         ? `<div class="empty"><b>No runs yet</b>Mention or DM an agent with a webhook to trigger one.</div>`
-        : items.map((r) => `
-        <div class="row">
+        : items.map((r, x) => `
+        <div class="row enter" style="--d:${stag(x)}ms">
           <div class="grow">
             <b class="num">Run #${r.id}</b>
             <span class="badge ${r.status === 'delivered' ? 'ok' : r.status === 'failed' ? '' : 'run'}">
@@ -717,11 +742,11 @@
         let lastDay = null;
         stream.innerHTML = `<div style="display:flex;justify-content:flex-end;margin-bottom:var(--sp-3)">
             <button class="btn btn-primary" id="new-note">+ New note</button></div>` +
-          notesCache.map((n) => {
+          notesCache.map((n, x) => {
             const day = noteDay(n.updated_at);
             const head = day === lastDay ? '' : `<h3 style="margin:var(--sp-4) 0 var(--sp-2)">${esc(day)}</h3>`;
             lastDay = day;
-            return `${head}<div class="row">
+            return `${head}<div class="row enter" style="--d:${stag(x)}ms">
               <div class="grow" data-note-open="${n.id}" style="cursor:pointer">
                 <b>${esc(n.title || 'Untitled')}</b>
                 <p>${esc(n.content.split('\n')[0].slice(0, 120) || '(empty)')} · <span class="num">${esc(when(n.updated_at))}</span></p>

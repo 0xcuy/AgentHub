@@ -314,9 +314,99 @@ button, input, textarea, select { font: inherit; color: inherit; }
 }
 @keyframes shimmer { to { background-position: -200% 0; } }
 
-/* landing stats band captions — bigger and heavier so the numbers read as a pair */
-.band .stat span { font-size: var(--fs-md); font-weight: 600; }
+/* landing stats band captions — enlarged so the number + caption read as a pair */
+.band .stat span {
+  display: block;
+  margin-top: var(--sp-2);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+/* ---------- motion system (Aksara) ----------
+   Entrances rise and fade with the signature --ease, staggered by a --d
+   delay the render code stamps per node. Hover micro-interactions are
+   transform-first so they composite. The ambient layer breathes behind
+   everything and is what the glass panels actually diffuse. All of it is
+   neutralized by the prefers-reduced-motion rule at the end of the file. */
+
+/* subtle ambient gradient motion: a viewport-fixed layer of soft color
+   blobs on a slow drift. transform-only so the compositor does the work;
+   negative z-index paints it above the propagated canvas background but
+   behind all content. The frost of every glass panel blurs whatever drifts
+   beneath it, so the whole UI breathes without a single pixel of noise. */
+body::after {
+  content: "";
+  position: fixed;
+  inset: -14% -10%;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(40vw 30vw at 76% 8%, rgba(139, 123, 255, 0.11), transparent 64%),
+    radial-gradient(32vw 28vw at 6% 72%, rgba(94, 234, 212, 0.07), transparent 60%),
+    radial-gradient(36vw 32vw at 46% 98%, rgba(125, 211, 252, 0.07), transparent 62%);
+  animation: ambientDrift 44s ease-in-out infinite alternate;
+  will-change: transform;
+}
+@keyframes ambientDrift {
+  0%   { transform: translate3d(0, 0, 0) scale(1); }
+  50%  { transform: translate3d(2.6vw, -2.2vh, 0) scale(1.05); }
+  100% { transform: translate3d(-2.2vw, 1.8vh, 0) scale(1.02); }
+}
+
+/* entrance cascade: lists in the workspace render as innerHTML, so entrance
+   motion is opt-in per node — render code adds .enter plus a --d stagger
+   delay. backwards fill keeps the node hidden until its delay elapses. */
+@keyframes enterRise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+.enter { animation: enterRise .45s var(--ease) backwards; animation-delay: var(--d, 0s); }
+
+/* empty/error states materialize gently instead of popping in */
+.empty { animation: enterRise .35s var(--ease) backwards; }
+
+/* dialogs rise and settle; the backdrop fades in behind them */
+@keyframes dialogIn { from { opacity: 0; transform: translateY(10px) scale(0.97); } to { opacity: 1; transform: none; } }
+@keyframes backdropIn { from { opacity: 0; } to { opacity: 1; } }
+dialog[open] { animation: dialogIn 0.28s var(--ease); }
+dialog[open]::backdrop { animation: backdropIn 0.28s ease; }
+
+/* hover micro-interactions — rows in inbox/mail/notes/directory lists shift
+   a whisper to the right; message rows ease their highlight instead of
+   snapping; the small action controls stop snapping their state colors.
+   These add only properties the page styles never set, so the cascade order
+   against the inline page styles does not matter. */
+.row { transition: background 0.18s var(--ease), transform 0.18s var(--ease); }
+.row:hover { transform: translateX(2px); }
+.msg { transition: background 0.18s var(--ease); }
+.status-btn { transition: background 0.15s var(--ease), color 0.15s var(--ease); }
+.reply-ctx { transition: background 0.15s var(--ease), color 0.15s var(--ease); }
+
+/* the presence dot breathes — a slow glow swell, echoing the landing pill */
+@keyframes presencePulse { 0%, 100% { box-shadow: 0 0 6px rgba(52, 211, 153, 0.6); } 50% { box-shadow: 0 0 10px rgba(52, 211, 153, 0.25); } }
+.presence { animation: presencePulse 3.2s ease-in-out infinite; }
+
+/* primary-button sheen: a light stripe sweeps across on hover, echoing the
+   landing CTA. Off-button at rest and after the sweep, so hover-out never
+   visibly snaps back. overflow:hidden on the button clips only children —
+   the focus-visible outline is drawn outside the border box and survives. */
+.btn-primary { position: relative; overflow: hidden; }
+.btn-primary::after {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0; left: 0;
+  width: 40%;
+  background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.38), transparent);
+  transform: translateX(-170%) skewX(-18deg);
+  pointer-events: none;
+}
+.btn-primary:hover::after {
+  transform: translateX(300%) skewX(-18deg);
+  transition: transform 0.65s var(--ease);
+}
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important;
+    /* delays are motion too: without zeroing them, backwards-filled entrance
+       nodes would sit invisible through their whole stagger before popping */
+    animation-delay: 0.01ms !important; transition-delay: 0.01ms !important; }
+  body::after { animation: none; }
 }

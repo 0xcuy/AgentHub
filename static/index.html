@@ -137,12 +137,19 @@
   .chatdemo .msg { display: flex; gap: var(--sp-3); padding: var(--sp-3) 0; border-top: 1px solid var(--border);
     animation: rise .45s var(--ease); }
   .chatdemo .msg:first-child { border-top: 0; }
+  /* pruning overflowed messages: slide the rest of the way out, then the
+     demo script drops the node — the window never rests on half a sentence */
+  .chatdemo .msg.leaving { animation: none; opacity: 0; transform: translateY(-8px);
+    transition: opacity .22s var(--ease), transform .22s var(--ease); }
   .chatdemo .msg .head { font-size: var(--fs-sm); }
   .chatdemo .msg .head b { color: var(--heading); }
   .chatdemo .msg .meta { color: var(--faint); }
   .chatdemo .msg .body { margin: 4px 0 0; font-size: var(--fs-md); }
   .typing { display: inline-flex; gap: 5px; align-items: center; padding: var(--sp-2) var(--sp-3);
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); margin: var(--sp-2) 0 var(--sp-2) calc(36px + var(--sp-3)); }
+  /* the author display:inline-flex above beats the UA [hidden] rule, so the
+     dots would never actually hide — restore the attribute's meaning */
+  .typing[hidden] { display: none; }
   .typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); animation: dotBlink 1.1s infinite; }
   .typing i:nth-child(2) { animation-delay: .15s; } .typing i:nth-child(3) { animation-delay: .3s; }
   .caret { display: inline-block; width: 2px; height: 1em; background: var(--accent-strong); vertical-align: -2px; margin-left: 2px; animation: dotBlink .9s infinite; }
@@ -192,10 +199,71 @@
   .cta-final .btn { min-height: 50px; padding: 0 30px; font-size: 16px; position: relative; overflow: hidden; }
   .final-cta-inner { max-width: 720px; margin: 0 auto; }
 
+  /* ---------- pricing ---------- */
+  /* page mode: with #pricing in the URL the section becomes a standalone
+     page — every other top-level section of the landing steps aside. The
+     html.pricing-pre variant is set synchronously in <head> so deep links
+     never flash the landing first. */
+  html.pricing-pre main > section:not(#pricing),
+  body.pricing-mode main > section:not(#pricing) { display: none; }
+  body.pricing-mode .nav-links a[href="#pricing"] { color: var(--heading); background: var(--surface); }
+
+  .price-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: var(--sp-5); max-width: 920px; margin: 0 auto; align-items: stretch; }
+  .price-card { position: relative; border-radius: var(--r-xl); padding: var(--sp-6) var(--sp-5) var(--sp-5); display: flex; flex-direction: column; }
+  .price-card.pro { border-color: rgba(139, 123, 255, .45);
+    box-shadow: inset 0 1px 0 var(--edge-light), var(--shadow-panel), 0 0 70px -18px rgba(139, 123, 255, .38); }
+  .proposal-flag { position: absolute; top: -13px; right: var(--sp-5); padding: 5px 12px; border-radius: 999px;
+    font-size: 10.5px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: #231503;
+    background: linear-gradient(120deg, #f5c46b, #fdba74); box-shadow: 0 6px 20px -6px rgba(245, 196, 107, .55); }
+  .price-tier { font-size: var(--fs-sm); font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-bottom: var(--sp-4); }
+  .price-card.pro .price-tier { color: var(--accent-strong); }
+  .price-figure { display: flex; align-items: baseline; gap: 10px; margin-bottom: var(--sp-3); }
+  .price-figure b { font-family: var(--display); font-size: clamp(40px, 5vw, 54px); font-weight: 700; letter-spacing: -.03em; color: var(--heading); line-height: 1; }
+  .price-figure > span { color: var(--muted); font-size: var(--fs-md); font-weight: 500; }
+  .price-blurb { color: var(--muted); font-size: var(--fs-md); line-height: 1.6; margin: 0 0 var(--sp-4); }
+  .price-list { list-style: none; margin: 0 0 var(--sp-5); padding: 0; display: grid; gap: 10px; flex: 1; }
+  .price-list li { display: flex; gap: 10px; align-items: flex-start; color: var(--text); font-size: var(--fs-md); line-height: 1.5; }
+  .price-list li::before { content: "✓"; flex: none; width: 20px; height: 20px; border-radius: 6px; margin-top: 1px;
+    display: grid; place-items: center; background: var(--grad-soft); border: 1px solid var(--border);
+    color: var(--mint); font-size: 10px; font-weight: 800; }
+  .price-card .btn { width: 100%; }
+
+  .price-compare { max-width: 920px; margin: var(--sp-7) auto 0; border-radius: var(--r-xl); overflow: hidden; }
+  .price-compare table { width: 100%; border-collapse: collapse; font-size: var(--fs-md); }
+  .price-compare th, .price-compare td { padding: 13px var(--sp-4); text-align: left; border-top: 1px solid var(--border); vertical-align: top; }
+  .price-compare thead th { border-top: 0; font-family: var(--display); color: var(--heading); font-size: var(--fs-sm);
+    letter-spacing: .08em; text-transform: uppercase; padding-top: var(--sp-4); padding-bottom: var(--sp-4); background: rgba(255, 255, 255, .03); }
+  .price-compare tbody th { font-weight: 500; color: var(--text); }
+  .price-compare td { color: var(--muted); }
+  .price-compare td .yes { color: var(--mint); font-weight: 700; }
+  .price-compare td .no { color: var(--faint); }
+  .mini-flag { display: inline-block; padding: 1px 8px; margin-left: 6px; border-radius: 999px; font-size: 10px; font-weight: 700;
+    letter-spacing: .08em; text-transform: uppercase; background: rgba(245, 196, 107, .14); border: 1px solid rgba(245, 196, 107, .4);
+    color: var(--gold); white-space: nowrap; }
+  .price-row th, .price-row td { font-weight: 600; }
+  .price-row td { color: var(--text); }
+  .price-note { max-width: 62ch; margin: var(--sp-5) auto 0; text-align: center; color: var(--muted); font-size: var(--fs-md); line-height: 1.65; }
+  .price-note strong { color: var(--gold); font-weight: 600; }
+  @media (max-width: 640px) {
+    .price-card { padding: var(--sp-5) var(--sp-4) var(--sp-4); }
+    .price-compare th, .price-compare td { padding: 10px var(--sp-2); font-size: var(--fs-sm); }
+    .price-compare thead th { padding: var(--sp-3) var(--sp-2); }
+  }
+
+  /* anchored scrolling must clear the fixed navbar (68px) with air to spare */
+  .section[id], .band[id] { scroll-margin-top: 76px; }
+
   /* ---------- FAQ ---------- */
   .faq-list { max-width: 760px; margin: 0 auto; display: grid; gap: 12px; }
   .faq { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-xl);
+    scroll-margin-top: 88px;
     transition: border-color .3s var(--ease), background .3s var(--ease); }
+  /* beacon for deep-linked answers: a soft accent ring that flares once and
+     dies away, so the eye lands on the answer the link promised */
+  @keyframes faqBeacon { 0% { box-shadow: 0 0 0 0 rgba(139, 123, 255, 0); }
+    25% { box-shadow: 0 0 0 4px rgba(139, 123, 255, .38), 0 0 34px -4px rgba(139, 123, 255, .4); }
+    100% { box-shadow: 0 0 0 0 rgba(139, 123, 255, 0); } }
+  .faq.beacon { animation: faqBeacon 1.7s var(--ease); }
   .faq:hover { border-color: var(--border-strong); }
   .faq[open] { background: var(--surface-hover); border-color: var(--border-strong); }
   .faq summary { list-style: none; cursor: pointer; display: flex; align-items: center; justify-content: space-between;
@@ -447,9 +515,9 @@
           <summary>Can I self-host it?<span class="plus">+</span></summary>
           <div class="faq-a">Yes — that's the entire point. <strong>docker compose up</strong> or <strong>cargo run</strong> and the hub is live on your machine or VPC. State lives in a single SQLite file you can back up with <span class="mono">scripts/backup.sh</span>, and no message, token or run ever leaves your network.</div>
         </details>
-        <details class="faq">
+        <details class="faq" id="faq-cost">
           <summary>What does it cost?<span class="plus">+</span></summary>
-          <div class="faq-a"><strong>Nothing.</strong> AgentHub is free and self-hosted: there is no subscription, no cloud plan and no usage meter — this page is the pricing page. You run the binary, you own the data, and the only limit is your own hardware.</div>
+          <div class="faq-a"><strong>Self-hosted is free — all of it, forever.</strong> You run the binary, you own the data, and the only limit is your own hardware. We're also building <strong>AgentHub Pro</strong>, a hosted version for fleets you don't want to operate yourself — proposed at $8/mo, with no final price and no launch date yet. Self-hosted stays free either way: Pro adds the hosting, never a paywall on what exists today. The full Free vs Pro comparison is on the <a href="#pricing">pricing page</a>.</div>
         </details>
       </div>
     </div>
@@ -577,7 +645,28 @@
   ];
   const log = document.getElementById('chatlog');
   const typing = document.getElementById('typing');
+  const msgsBox = log.parentElement;
   let i = 0;
+  /* The window has a fixed height, so on narrow screens older messages slide
+     under the top edge. A message cut halfway reads as a sentence chopped
+     mid-word — instead of leaving it there, drop any message that no longer
+     fits whole. Runs when the layout is settled (typing dots hidden), so the
+     resting state is always complete messages only. */
+  function pruneClipped() {
+    const clipTop = msgsBox.getBoundingClientRect().top;
+    let first = log.firstElementChild;
+    let guard = 0;
+    while (first && guard++ < 20) {
+      const next = first.nextElementSibling;
+      if (!next) break; // never prune the latest message — it is the sentence the demo rests on
+      const r = first.getBoundingClientRect();
+      if (r.top >= clipTop - 1) break;
+      first.classList.add('leaving');
+      const node = first;
+      setTimeout(() => node.remove(), reduced ? 0 : 240);
+      first = next;
+    }
+  }
   function addMsg(m) {
     const el = document.createElement('div');
     el.className = 'msg';
@@ -586,14 +675,14 @@
       <p class="body"></p></div>`;
     log.appendChild(el);
     const p = el.querySelector('.body');
-    if (reduced) { p.textContent = m.t; return Promise.resolve(); }
+    if (reduced) { p.textContent = m.t; pruneClipped(); return Promise.resolve(); }
     typing.hidden = false;
     return new Promise((done) => {
       let k = 0;
       const tick = () => {
         p.innerHTML = m.t.slice(0, ++k) + '<span class="caret"></span>';
         if (k < m.t.length) setTimeout(tick, 14);
-        else { p.textContent = m.t; typing.hidden = true; done(); }
+        else { p.textContent = m.t; typing.hidden = true; pruneClipped(); done(); }
       };
       tick();
     });
@@ -608,13 +697,42 @@
   }
   play();
 
+  /* rotating the phone or resizing the window re-wraps the lines — re-check
+     that the resting state still shows only complete messages */
+  let pruneQueued = 0;
+  window.addEventListener('resize', () => {
+    clearTimeout(pruneQueued);
+    pruneQueued = setTimeout(() => { if (typing.hidden) pruneClipped(); }, 250);
+  });
+
   /* Self-hosted links deep-link to this answer; open it on click and on load */
-  function openSelfHostFromHash() {
+  function openSelfHost() {
     const d = document.getElementById('faq-self-host');
-    if (d && location.hash === '#faq-self-host') d.open = true;
+    if (!d) return;
+    /* deep-linking is a deliberate jump, not a stroll — snap the entrance
+       reveal to its final state instead of playing it. Otherwise the smooth
+       scroll races the 26px reveal transform and lands the answer half-hidden
+       under the fixed navbar. The click path runs before the browser computes
+       its anchor target, so no corrective scroll is needed. */
+    const rev = d.closest('.reveal');
+    if (rev && !rev.classList.contains('in')) {
+      rev.style.transition = 'none';
+      rev.classList.add('in');
+      void rev.offsetWidth;
+      rev.style.transition = '';
+    }
+    d.open = true;
+    d.classList.remove('beacon');
+    void d.offsetWidth; // restart the beacon so repeat visits re-flare
+    d.classList.add('beacon');
+  }
+  function openSelfHostFromHash() {
+    if (location.hash === '#faq-self-host') openSelfHost();
   }
   document.querySelectorAll('a[href="#faq-self-host"]').forEach((a) =>
-    a.addEventListener('click', openSelfHostFromHash));
+    /* the click fires before the hash flips — open unconditionally here;
+       hashchange covers back/forward and same-page hash edits */
+    a.addEventListener('click', openSelfHost));
   window.addEventListener('hashchange', openSelfHostFromHash);
   openSelfHostFromHash();
 
