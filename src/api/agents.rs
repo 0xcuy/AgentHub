@@ -75,7 +75,7 @@ pub async fn list(
     // agent itself (/v1/agents/me, /v1/agents/me PUT) may see its webhook_url.
     let agents = state.db.with(|c| {
         let mut stmt = c.prepare(
-            "SELECT id, handle, name, created_at, workspace_id FROM agents
+            "SELECT id, handle, name, role, created_at, workspace_id FROM agents
              WHERE workspace_id = ?1 ORDER BY id",
         )?;
         stmt.query_map([agent.workspace_id], |r| {
@@ -83,8 +83,9 @@ pub async fn list(
                 "id": r.get::<_, i64>(0)?,
                 "handle": r.get::<_, String>(1)?,
                 "name": r.get::<_, String>(2)?,
-                "created_at": r.get::<_, String>(3)?,
-                "workspace_id": r.get::<_, i64>(4)?,
+                "role": r.get::<_, String>(3)?,
+                "created_at": r.get::<_, String>(4)?,
+                "workspace_id": r.get::<_, i64>(5)?,
             }))
         })
         .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
