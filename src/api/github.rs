@@ -77,17 +77,24 @@ fn map_pull_row(r: &rusqlite::Row) -> rusqlite::Result<GitHubPull> {
 fn require_channel_member(
     c: &rusqlite::Connection,
     channel_id: i64,
-    agent_id: i64,
+    agent: &crate::models::Agent,
 ) -> Result<(), ApiError> {
+    // Membership AND the channel must live in the caller's workspace:
+    // another workspace's channel reads as nonexistent (404).
     let member: i64 = c.query_row(
-        "SELECT COUNT(*) FROM channel_members WHERE channel_id = ?1 AND agent_id = ?2",
-        rusqlite::params![channel_id, agent_id],
+        "SELECT COUNT(*) FROM channel_members cm
+         JOIN channels ch ON ch.id = cm.channel_id
+         WHERE cm.channel_id = ?1 AND cm.agent_id = ?2 AND ch.workspace_id = ?3",
+        rusqlite::params![channel_id, agent.id, agent.workspace_id],
         |r| r.get(0),
     )?;
     if member == 0 {
         // Distinguish 404 (no such channel) from 403 (not a member).
-        let exists: i64 = c
-            .query_row("SELECT COUNT(*) FROM channels WHERE id = ?1", [channel_id], |r| r.get(0))?;
+        let exists: i64 = c.query_row(
+            "SELECT COUNT(*) FROM channels WHERE id = ?1 AND workspace_id = ?2",
+            rusqlite::params![channel_id, agent.workspace_id],
+            |r| r.get(0),
+        )?;
         if exists == 0 {
             return Err(ApiError::not_found("channel not found"));
         }
@@ -195,7 +202,7 @@ pub async fn link_repo(
     let now = now_iso();
     let repo = state.db.try_with(|c| {
         let tx = c.transaction()?;
-        require_channel_member(&tx, channel_id, agent.id)?;
+        require_channel_member(&tx, channel_id, &agent)?;
         require_channel_admin(&tx, channel_id, agent.id)?;
         let linked: i64 = tx.query_row(
             "SELECT COUNT(*) FROM github_repos WHERE channel_id = ?1",
@@ -255,7 +262,7 @@ pub async fn list_repos(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let agent = require_agent(&state, &headers)?;
     let repos: Vec<GitHubRepo> = state.db.try_with(|c| {
-        require_channel_member(c, channel_id, agent.id)?;
+        require_channel_member(c, channel_id, &agent)?;
         let mut stmt = c.prepare(
             "SELECT id, channel_id, owner, name, default_branch, linked_by, created_at, updated_at
              FROM github_repos WHERE channel_id = ?1 ORDER BY id",
@@ -280,7 +287,7 @@ pub async fn unlink_repo(
     let agent = require_agent(&state, &headers)?;
     let deleted = state.db.try_with(|c| {
         let tx = c.transaction()?;
-        require_channel_member(&tx, channel_id, agent.id)?;
+        require_channel_member(&tx, channel_id, &agent)?;
         require_channel_admin(&tx, channel_id, agent.id)?;
         let linked: Option<i64> = tx
             .query_row(
@@ -386,7 +393,7 @@ pub async fn list_pulls(
         - chrono::Duration::seconds(state.github_cache_ttl_secs))
     .to_rfc3339();
     let (repo, mut pulls) = state.db.try_with(|c| {
-        require_channel_member(c, channel_id, agent.id)?;
+        require_channel_member(c, channel_id, &agent)?;
         let repo = c
             .query_row(
                 "SELECT id, channel_id, owner, name, default_branch, linked_by, created_at, updated_at
@@ -477,7 +484,7 @@ pub async fn create_pull(
     }
 
     let repo = state.db.try_with(|c| {
-        require_channel_member(c, channel_id, agent.id)?;
+        require_channel_member(c, channel_id, &agent)?;
         let repo = c
             .query_row(
                 "SELECT id, channel_id, owner, name, default_branch, linked_by, created_at, updated_at

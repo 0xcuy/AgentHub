@@ -88,15 +88,60 @@ async fn call_raw(
 }
 
 async fn register(router: &RouterT, handle: &str, webhook: Option<&str>) -> (i64, String) {
+    signup_user(router, handle, webhook).await
+}
+
+/// Human signup: 1 email = 1 workspace, with a linked agent holding the
+/// bearer token. Mirrors the real UI flow: signup sets the session cookie,
+/// then /ui/api/me returns the linked agent's bearer token.
+async fn signup_user(router: &RouterT, handle: &str, webhook: Option<&str>) -> (i64, String) {
+    let email = format!("{handle}@example.com");
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ui/signup")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "email": email,
+                "password": "password123",
+                "handle": handle,
+                "name": handle,
+                "webhook_url": webhook,
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let res = Oneshot::new(router.clone(), req).await.unwrap();
+    let status = res.status();
+    assert!(
+        res.headers().get("set-cookie").is_some(),
+        "signup must set the session cookie"
+    );
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert_eq!(status, StatusCode::OK, "signup failed: {v}");
+    let agent = v["agent"]["id"].as_i64().unwrap();
+    let token = v["agent"]["token"].as_str().unwrap().to_string();
+    (agent, token)
+}
+
+/// Add another agent to the CALLER's workspace via the authenticated
+/// POST /v1/agents. The new agent's workspace is always the caller's.
+async fn add_agent(
+    router: &RouterT,
+    owner_token: &str,
+    handle: &str,
+    webhook: Option<&str>,
+) -> (i64, String) {
     let (status, v) = call(
         router,
         "POST",
         "/v1/agents",
-        None,
+        Some(owner_token),
         Some(json!({ "name": handle, "handle": handle, "webhook_url": webhook })),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "register failed: {v}");
+    assert_eq!(status, StatusCode::CREATED, "agent create failed: {v}");
     (v["agent"]["id"].as_i64().unwrap(), v["token"].as_str().unwrap().to_string())
 }
 
@@ -144,12 +189,23 @@ async fn register_and_auth() {
         Some(json!({ "name": "x", "handle": "alpha" })),
     )
     .await;
+    // Breaking change: open self-registration is gone — creating an agent
+    // requires a valid bearer token (workspaces are the tenant boundary).
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = call(
+        &router,
+        "POST",
+        "/v1/agents",
+        Some(&token),
+        Some(json!({ "name": "x", "handle": "alpha" })),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
     let (status, _) = call(
         &router,
         "POST",
         "/v1/agents",
-        None,
+        Some(&token),
         Some(json!({ "name": "x", "handle": "Bad Handle!" })),
     )
     .await;
@@ -158,7 +214,7 @@ async fn register_and_auth() {
         &router,
         "POST",
         "/v1/agents",
-        None,
+        Some(&token),
         Some(json!({ "name": "x", "handle": "beta", "evil": 1 })),
     )
     .await;
@@ -173,14 +229,15 @@ async fn register_and_auth() {
 async fn channel_flow() {
     let router = test_app("chan");
     let (a1, t1) = register(&router, "alpha", None).await;
-    let (a2, t2) = register(&router, "beta", None).await;
+    // beta joins alpha's workspace (signups each get their own).
+    let (a2, t2) = add_agent(&router, &t1, "beta", None).await;
 
     let (status, v) = call(
         &router,
         "POST",
         "/v1/channels",
         Some(&t1),
-        Some(json!({ "name": "general", "member_ids": [a1] })),
+        Some(json!({ "name": "eng", "member_ids": [a1] })),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
@@ -297,7 +354,7 @@ async fn channel_flow() {
 async fn dm_flow_and_pagination() {
     let router = test_app("dm");
     let (a1, t1) = register(&router, "alpha", None).await;
-    let (a2, t2) = register(&router, "beta", None).await;
+    let (a2, t2) = add_agent(&router, &t1, "beta", None).await;
     for i in 0..5 {
         let (status, _) = call(
             &router,
@@ -360,7 +417,7 @@ async fn dm_flow_and_pagination() {
 async fn mail_flow() {
     let router = test_app("mail");
     let (_a1, t1) = register(&router, "alpha", None).await;
-    let (_a2, t2) = register(&router, "beta", None).await;
+    let (_a2, t2) = add_agent(&router, &t1, "beta", None).await;
     let (status, _) = call(
         &router,
         "POST",
@@ -398,7 +455,7 @@ async fn dm_triggers_webhook_run() {
     let (base, received) = start_webhook_server().await;
     let router = test_app("run");
     let (a1, t1) = register(&router, "alpha", None).await;
-    let (a2, t2) = register(&router, "beta", None).await;
+    let (a2, t2) = add_agent(&router, &t1, "beta", None).await;
 
     // no webhook yet -> no run for beta
     let (status, _) = call(
@@ -569,7 +626,7 @@ async fn rate_limit_per_token() {
 async fn channel_permissions() {
     let router = test_app("perm");
     let (a1, t1) = register(&router, "alpha", None).await;
-    let (a2, t2) = register(&router, "beta", None).await;
+    let (a2, t2) = add_agent(&router, &t1, "beta", None).await;
     let (a3, t3) = register(&router, "gamma", None).await;
 
     let (status, v) = call(
@@ -699,7 +756,7 @@ async fn outbox_retries_then_fails_and_survives_restart() {
     let router = aghub::api::build_router(state.clone()); // no dispatcher: we drive it by hand
     let (_a1, t1) = register(&router, "alpha", None).await;
     // webhook pointing at a closed port -> every attempt fails
-    let (a2, _t2) = register(&router, "beta", Some("http://127.0.0.1:9/run")).await;
+    let (a2, _t2) = add_agent(&router, &t1, "beta", Some("http://127.0.0.1:9/run")).await;
 
     let (status, _) = call(
         &router,
@@ -775,7 +832,7 @@ async fn outbox_retries_then_fails_and_survives_restart() {
 async fn sse_stream_pushes_inbox_events_only_for_self() {
     let (router, _state) = test_app_with_state("sse");
     let (a1, t1) = register(&router, "alpha", None).await;
-    let (a2, t2) = register(&router, "beta", None).await;
+    let (a2, t2) = add_agent(&router, &t1, "beta", None).await;
 
     // subscribe beta to the stream and read frames while alpha sends a DM
     let req = Request::builder()
@@ -832,7 +889,7 @@ async fn sse_stream_pushes_inbox_events_only_for_self() {
 #[tokio::test]
 async fn security_headers_on_all_responses() {
     let router = test_app("secHeaders");
-    for uri in ["/", "/login", "/signup", "/app", "/v1/channels", "/static/app.css", "/healthz"] {
+    for uri in ["/", "/login", "/signup", "/app", "/static/app.css", "/healthz"] {
         let req = Request::builder().method("GET").uri(uri).body(Body::empty()).unwrap();
         let res = Oneshot::new(router.clone(), req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK, "uri: {uri}");
@@ -862,6 +919,18 @@ async fn security_headers_on_all_responses() {
             "uri: {uri}"
         );
     }
+
+    // /v1 routes are authenticated now (breaking change); the security
+    // headers must still ride along on the 401.
+    let req = Request::builder().method("GET").uri("/v1/channels").body(Body::empty()).unwrap();
+    let res = Oneshot::new(router.clone(), req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "/v1/channels");
+    let h = res.headers();
+    assert_eq!(
+        h.get("strict-transport-security").unwrap(),
+        "max-age=31536000; includeSubDomains",
+        "uri: /v1/channels"
+    );
 
     // headers are also present on error and rate-limited responses
     let req = Request::builder()
@@ -932,6 +1001,7 @@ async fn login_lockout_after_repeated_failures() {
 #[tokio::test]
 async fn unauth_post_rate_limited_per_ip() {
     let router = test_app("ipLimit");
+    let (_id, token) = register(&router, "alpha", None).await;
 
     // POST /v1/agents: the 21st request from one IP gets 429 + Retry-After
     let mut saw_429 = false;
@@ -940,14 +1010,15 @@ async fn unauth_post_rate_limited_per_ip() {
             &router,
             "POST",
             "/v1/agents",
-            None,
+            Some(&token),
             Some(json!({ "name": "x", "handle": format!("h{i}") })),
         )
         .await;
         if status == StatusCode::TOO_MANY_REQUESTS {
             saw_429 = true;
             assert_eq!(v["error"]["code"], "rate_limited");
-            assert!(i >= 20, "limit is 20; 429 came at request {}", i + 1);
+            // Limit is 20/window/IP; the signup above consumed one slot.
+            assert!(i >= 19, "limit is 20; 429 came at request {}", i + 1);
             break;
         }
         assert_eq!(status, StatusCode::CREATED);
@@ -959,6 +1030,7 @@ async fn unauth_post_rate_limited_per_ip() {
         .method("POST")
         .uri("/v1/agents")
         .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {token}"))
         .header("X-Forwarded-For", "198.51.100.9")
         .body(Body::from(json!({ "name": "y", "handle": "otherip" }).to_string()))
         .unwrap();
@@ -1056,10 +1128,10 @@ fn github_app(name: &str) -> (RouterT, Arc<aghub::github::MockGitHub>) {
     (aghub::api::build_router(state), mock)
 }
 
-/// alpha + beta in one channel; ghost is a registered outsider.
+/// alpha + beta in one channel; ghost is a registered outsider (own workspace).
 async fn github_setup(router: &RouterT) -> (i64, String, i64, String, String) {
     let (a1, t1) = register(router, "alpha", None).await;
-    let (a2, t2) = register(router, "beta", None).await;
+    let (a2, t2) = add_agent(router, &t1, "beta", None).await;
     let (_, tout) = register(router, "ghost", None).await;
     let (status, v) = call(
         router,
@@ -1120,7 +1192,7 @@ async fn github_link_list_unlink_and_visibility() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["repos"].as_array().unwrap().len(), 1);
     let (status, _) = call(&router, "GET", &repos_uri, Some(&tout), None).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "outsider must not list links");
+    assert_eq!(status, StatusCode::NOT_FOUND, "outsider (another workspace) must not list links");
     let (status, v) = call(&router, "GET", "/v1/channels/999999/github/repos", Some(&t1), None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(v["error"]["code"], "not_found");
@@ -1329,7 +1401,7 @@ async fn github_pulls_cache_filters_and_ttl_refresh() {
     let (status, _) = call(&router, "GET", &format!("{base}?limit=100000"), Some(&t1), None).await;
     assert_eq!(status, StatusCode::OK, "limit is clamped, not rejected");
     let (status, _) = call(&router, "GET", &base, Some(&tout), None).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "outsider must not list pulls");
+    assert_eq!(status, StatusCode::NOT_FOUND, "outsider (another workspace) must not list pulls");
     let (status, _) = call(
         &router,
         "GET",
@@ -1391,7 +1463,7 @@ async fn github_create_pull() {
     let (status, _) = call(&router, "POST", &pulls_uri, Some(&t2), Some(body.clone())).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "plain member must not create PRs");
     let (status, _) = call(&router, "POST", &pulls_uri, Some(&tout), Some(body.clone())).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "outsider must not create PRs");
+    assert_eq!(status, StatusCode::NOT_FOUND, "outsider (another workspace) must not even see the channel");
 
     // Admin creates: the transport is called and the returned PR is answered.
     mock.push_post_response(
@@ -1524,3 +1596,457 @@ async fn github_unconfigured_returns_503() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{v}");
     assert_eq!(v["error"]["code"], "github_unavailable");
 }
+
+// --- Workspace per email: multi-tenant isolation ---
+
+#[tokio::test]
+async fn slug_derived_from_name_and_deduped() {
+    let router = test_app("wsSlug");
+    // "Budi Santoso workspace" -> slug 'budi-santoso-workspace'.
+    let (_, cookie1) = register_named(&router, "budi", "Budi Santoso").await;
+    let (status, v) = call_me_cookie(&router, &cookie1).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["workspace"]["slug"], "budi-santoso-workspace", "{v}");
+
+    // A second user with the same name gets a deduped slug: -2.
+    let (_, cookie2) = register_named(&router, "budi2", "Budi Santoso").await;
+    let (status, v) = call_me_cookie(&router, &cookie2).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["workspace"]["slug"], "budi-santoso-workspace-2", "{v}");
+}
+
+/// Signup with an explicit display name (register() uses the handle);
+/// returns the session cookie so /ui/api/me (cookie-only) can be called.
+async fn register_named(router: &RouterT, handle: &str, name: &str) -> (i64, String) {
+    let email = format!("{handle}@example.com");
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ui/signup")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "email": email,
+                "password": "password123",
+                "handle": handle,
+                "name": name,
+                "webhook_url": null,
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let res = Oneshot::new(router.clone(), req).await.unwrap();
+    let status = res.status();
+    let cookie = res
+        .headers()
+        .get("set-cookie")
+        .and_then(|v| v.to_str().ok())
+        .expect("signup must set the session cookie")
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert_eq!(status, StatusCode::OK, "signup failed: {v}");
+    (v["agent"]["id"].as_i64().unwrap(), cookie)
+}
+
+/// GET /ui/api/me with the session cookie (the route is cookie-only).
+async fn call_me_cookie(router: &RouterT, cookie: &str) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("GET")
+        .uri("/ui/api/me")
+        .header("Cookie", cookie)
+        .body(Body::empty())
+        .unwrap();
+    let res = Oneshot::new(router.clone(), req).await.unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, v)
+}
+
+#[tokio::test]
+async fn signup_creates_private_workspace_with_general() {
+    let router = test_app("wsSignup");
+    let (_a1, t1) = register(&router, "alpha", None).await;
+    let (_a2, t2) = register(&router, "beta", None).await;
+
+    // Each signup lands in its OWN workspace with its own empty #general.
+    let (status, v1) = call(&router, "GET", "/v1/channels", Some(&t1), None).await;
+    assert_eq!(status, StatusCode::OK, "{v1}");
+    let channels1 = v1["channels"].as_array().unwrap();
+    assert_eq!(channels1.len(), 1, "exactly the signup #general: {v1}");
+    assert_eq!(channels1[0]["name"], "general");
+
+    let (status, v2) = call(&router, "GET", "/v1/channels", Some(&t2), None).await;
+    assert_eq!(status, StatusCode::OK, "{v2}");
+    let channels2 = v2["channels"].as_array().unwrap();
+    assert_eq!(channels2.len(), 1, "beta's own #general, not alpha's: {v2}");
+    assert_eq!(channels2[0]["name"], "general");
+    assert_ne!(
+        channels1[0]["id"], channels2[0]["id"],
+        "the two signups must not share a channel"
+    );
+
+    // alpha's #general is empty and alpha is its admin.
+    let chan1 = channels1[0]["id"].as_i64().unwrap();
+    let (status, v) = call(&router, "GET", &format!("/v1/channels/{chan1}/messages"), Some(&t1), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["messages"].as_array().unwrap().len(), 0, "fresh #general is empty");
+    let (status, _) = call(
+        &router,
+        "PATCH",
+        &format!("/v1/channels/{chan1}"),
+        Some(&t1),
+        Some(json!({ "topic": "mine" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the signup user admins their own #general");
+
+    // Agents listing is workspace-scoped too.
+    let (status, v) = call(&router, "GET", "/v1/agents", Some(&t1), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let ids: Vec<i64> = v["agents"].as_array().unwrap().iter().map(|a| a["id"].as_i64().unwrap()).collect();
+    assert_eq!(ids, vec![_a1], "alpha must see only their own workspace's agents");
+}
+
+#[tokio::test]
+async fn cross_workspace_access_is_denied() {
+    let router = test_app("wsIso");
+    let (_a1, t1) = register(&router, "alpha", None).await;
+    let (a2, t2) = register(&router, "beta", None).await;
+
+    // alpha's second channel + beta's channel, in their own workspaces.
+    let (status, v) = call(
+        &router,
+        "POST",
+        "/v1/channels",
+        Some(&t1),
+        Some(json!({ "name": "eng", "topic": "alpha eng" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    let alpha_chan = v["channel"]["id"].as_i64().unwrap();
+
+    // beta cannot list or read alpha's channels: 404, never a leak.
+    let (status, _) = call(&router, "GET", &format!("/v1/channels/{alpha_chan}/messages"), Some(&t2), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "cross-workspace read must be 404");
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{alpha_chan}/messages"),
+        Some(&t2),
+        Some(json!({ "body": "intrusion" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{v}");
+    let (status, _) = call(
+        &router,
+        "PATCH",
+        &format!("/v1/channels/{alpha_chan}"),
+        Some(&t2),
+        Some(json!({ "topic": "hijacked" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "update stays a 403: it must not confirm existence");
+
+    // beta cannot add itself to alpha's channel (admin + same-workspace checks).
+    let (status, _) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{alpha_chan}/members"),
+        Some(&t2),
+        Some(json!({ "agent_ids": [a2] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // alpha cannot add beta (another workspace) as a member: 404, no leak.
+    let (status, _) = call(
+        &router,
+        "POST",
+        &format!("/v1/channels/{alpha_chan}/members"),
+        Some(&t1),
+        Some(json!({ "agent_ids": [a2] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "adding a foreign agent must be 404");
+
+    // DMs across workspaces fail in both directions.
+    let (status, _) = call(
+        &router,
+        "POST",
+        &format!("/v1/dms/{a2}/messages"),
+        Some(&t1),
+        Some(json!({ "body": "hello?" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{v}");
+    let (status, _) = call(&router, "GET", &format!("/v1/dms/{a2}/messages"), Some(&t1), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, v) = call(&router, "GET", "/v1/dms", Some(&t1), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["partners"].as_array().unwrap().len(), 0, "partners stay inside the workspace");
+
+    // Memories: beta cannot recall alpha's private memories.
+    let (status, v) = call(
+        &router,
+        "POST",
+        "/v1/memory",
+        Some(&t1),
+        Some(json!({ "content": "alpha deployment key is hunter2", "kind": "fakta" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    let mem_id = v["memory"]["id"].as_i64().unwrap();
+    let (status, v) = call(&router, "GET", "/v1/memory?query=deployment+key", Some(&t2), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["memories"].as_array().unwrap().len(), 0, "FTS recall must not cross workspaces");
+    let (status, _) = call(&router, "GET", "/v1/memory?query=deployment+key", Some(&t1), None).await;
+    assert_eq!(status, StatusCode::OK, "owner still recalls it");
+    let (status, _) = call(&router, "DELETE", &format!("/v1/memory/{mem_id}"), Some(&t2), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "deleting a foreign memory must be 404");
+
+    // Mail across workspaces fails with 404.
+    let (status, _) = call(
+        &router,
+        "POST",
+        "/v1/mail",
+        Some(&t1),
+        Some(json!({ "to_agent_id": a2, "subject": "s", "body": "b" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "mail into another workspace must be 404");
+}
+
+#[tokio::test]
+async fn agent_create_requires_auth_and_joins_callers_workspace() {
+    let router = test_app("wsAgent");
+
+    // Unauthenticated create -> 401 (breaking change: open registration gone).
+    let (status, v) = call(
+        &router,
+        "POST",
+        "/v1/agents",
+        None,
+        Some(json!({ "name": "Siera", "handle": "siera" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{v}");
+
+    // Authenticated: lands in the CALLER's workspace, never a global pool.
+    let (_a1, t1) = register(&router, "alpha", None).await;
+    let (a2, t2) = add_agent(&router, &t1, "siera", None).await;
+    let (status, v) = call(&router, "GET", "/v1/agents", Some(&t1), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let ids: Vec<i64> = v["agents"].as_array().unwrap().iter().map(|a| a["id"].as_i64().unwrap()).collect();
+    assert_eq!(ids, vec![_a1, a2], "both agents share alpha's workspace");
+    let (status, v) = call(&router, "GET", "/v1/agents", Some(&t2), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let ids: Vec<i64> = v["agents"].as_array().unwrap().iter().map(|a| a["id"].as_i64().unwrap()).collect();
+    assert_eq!(ids, vec![_a1, a2], "the new agent sees the same workspace");
+
+    // Another signup's workspace stays out of it.
+    let (_a3, t3) = register(&router, "beta", None).await;
+    let (status, v) = call(&router, "GET", "/v1/agents", Some(&t3), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let ids: Vec<i64> = v["agents"].as_array().unwrap().iter().map(|a| a["id"].as_i64().unwrap()).collect();
+    assert_eq!(ids, vec![_a3], "beta's workspace lists only beta's agent");
+
+    // Same channel name per workspace is allowed; a duplicate inside one is not.
+    let (status, _) = call(&router, "POST", "/v1/channels", Some(&t1), Some(json!({ "name": "general" }))).await;
+    assert_eq!(status, StatusCode::CONFLICT, "duplicate name inside one workspace still conflicts");
+    let (status, _) = call(&router, "POST", "/v1/channels", Some(&t3), Some(json!({ "name": "eng" }))).await;
+    assert_eq!(status, StatusCode::CREATED, "beta creates their own channel");
+    let (status, _) = call(&router, "POST", "/v1/channels", Some(&t1), Some(json!({ "name": "eng" }))).await;
+    assert_eq!(status, StatusCode::CREATED, "two workspaces may share a channel name");
+}
+
+/// Migration backfill: a pre-migration fixture DB (agents, #general, messages,
+/// memories, one linked repo) keeps every row inside legacy workspace 1.
+#[tokio::test]
+async fn migration_backfills_legacy_rows_into_workspace_1() {
+    let db_path = format!(
+        "/tmp/aghub-ws-backfill-{}-{}.db",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::SeqCst)
+    );
+    let db = aghub::db::Db::open(&db_path).expect("open fixture db");
+
+    // Build the pre-migration world: schema 0001..0005 only, then legacy rows.
+    db.with(|c| {
+        c.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL);",
+        )?;
+        c.execute_batch(include_str!("../migrations/0001_init.sql"))?;
+        c.execute_batch(include_str!("../migrations/0002_hardening.sql"))?;
+        c.execute_batch(include_str!("../migrations/0003_ui_auth.sql"))?;
+        c.execute_batch(include_str!("../migrations/0004_memory.sql"))?;
+        c.execute_batch(include_str!("../migrations/0005_github.sql"))?;
+        for (v, name) in [
+            (1, "0001_init"),
+            (2, "0002_hardening"),
+            (3, "0003_ui_auth"),
+            (4, "0004_memory"),
+            (5, "0005_github"),
+        ] {
+            c.execute(
+                "INSERT INTO schema_migrations (version, name) VALUES (?1, ?2)",
+                rusqlite::params![v, name],
+            )?;
+        }
+        // Legacy fixture: 2 agents, #general with 2 messages, 2 memories
+        // (one private, one channel), 1 linked repo — no workspaces yet.
+        c.execute(
+            "INSERT INTO agents (id, handle, name, token, created_at)
+             VALUES (1, 'sekar', 'Sekar', 'tok-sekar', '2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        c.execute(
+            "INSERT INTO agents (id, handle, name, token, created_at)
+             VALUES (2, 'fable', 'Fable', 'tok-fable', '2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        c.execute(
+            "INSERT INTO channels (id, name, topic, created_at)
+             VALUES (1, 'general', 'lobby', '2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        c.execute(
+            "INSERT INTO channel_members (channel_id, agent_id, joined_at, role)
+             VALUES (1, 1, '2026-01-01T00:00:00Z', 'admin')",
+            [],
+        )?;
+        c.execute(
+            "INSERT INTO messages (id, channel_id, sender_id, body, created_at)
+             VALUES (1, 1, 1, 'hello world', '2026-01-01T00:00:01Z')",
+            [],
+        )?;
+        c.execute(
+            "INSERT INTO messages (id, channel_id, sender_id, body, created_at)
+             VALUES (2, 1, 2, 'halo juga', '2026-01-01T00:00:02Z')",
+            [],
+        )?;
+        c.execute(
+            "INSERT INTO memories (id, agent_id, channel_id, scope, kind, content, created_at)
+             VALUES (1, 1, NULL, 'private', 'preferensi', 'sekar suka kopi', '2026-01-01T00:00:03Z')",
+            [],
+        )?;
+        c.execute(
+            "INSERT INTO memories (id, agent_id, channel_id, scope, kind, content, created_at)
+             VALUES (2, 1, 1, 'channel', 'fakta', 'general berjalan', '2026-01-01T00:00:04Z')",
+            [],
+        )?;
+        c.execute(
+            "INSERT INTO memories_fts (content, memory_id) VALUES ('sekar suka kopi', 1)",
+            [],
+        )?;
+        c.execute(
+            "INSERT INTO memories_fts (content, memory_id) VALUES ('general berjalan', 2)",
+            [],
+        )?;
+        c.execute(
+            "INSERT INTO github_repos (id, channel_id, owner, name, default_branch, linked_by, created_at, updated_at)
+             VALUES (1, 1, 'acme', 'api', 'main', 1, '2026-01-01T00:00:05Z', '2026-01-01T00:00:05Z')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    // Run the full migration chain: 0006 must backfill without losing rows.
+    db.migrate().expect("migrate to 0006");
+
+    let (ws_count, legacy): (i64, (i64, String, Option<i64>)) = db
+        .with(|c| {
+            Ok((
+                c.query_row("SELECT COUNT(*) FROM workspaces", [], |r| r.get(0))?,
+                c.query_row(
+                    "SELECT id, name, owner_user_id FROM workspaces WHERE id = 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(ws_count, 1, "exactly the legacy workspace exists");
+    assert_eq!(legacy.0, 1);
+    assert_eq!(legacy.1, "SIERA Labs");
+    assert_eq!(legacy.2, None, "legacy workspace predates human users");
+
+    let (agents_ws, channels_ws, memories_ws): (Vec<i64>, Vec<i64>, Vec<i64>) = db
+        .with(|c| {
+            Ok((
+                c.prepare("SELECT workspace_id FROM agents ORDER BY id")?
+                    .query_map([], |r| r.get(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+                c.prepare("SELECT workspace_id FROM channels ORDER BY id")?
+                    .query_map([], |r| r.get(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+                c.prepare("SELECT workspace_id FROM memories ORDER BY id")?
+                    .query_map([], |r| r.get(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(agents_ws, vec![1, 1], "every legacy agent joins workspace 1");
+    assert_eq!(channels_ws, vec![1], "the legacy #general joins workspace 1");
+    assert_eq!(memories_ws, vec![1, 1], "every legacy memory joins workspace 1");
+
+    // No data loss: ids, contents and links all survive.
+    let (msg_count, repo_count, channel_id): (i64, i64, i64) = db
+        .with(|c| {
+            Ok((
+                c.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))?,
+                c.query_row("SELECT COUNT(*) FROM github_repos", [], |r| r.get(0))?,
+                c.query_row("SELECT id FROM channels WHERE name = 'general'", [], |r| r.get(0))?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(msg_count, 2, "messages survive the channels rebuild");
+    assert_eq!(repo_count, 1, "the linked repo survives");
+    assert_eq!(channel_id, 1, "channel ids are preserved by the rebuild");
+
+    // Uniqueness moved from global to per-workspace.
+    let dup_in_ws1 = db.with(|c| {
+        c.execute(
+            "INSERT INTO channels (workspace_id, name, topic, created_at) VALUES (1, 'general', NULL, '2026-01-02T00:00:00Z')",
+            [],
+        )
+    });
+    assert!(dup_in_ws1.is_err(), "duplicate #general inside one workspace must still be rejected");
+    let ws2 = db.with(|c| {
+        c.execute(
+            "INSERT INTO workspaces (id, owner_user_id, slug, name, created_at) VALUES (2, NULL, 'other', 'Other', '2026-01-02T00:00:00Z')",
+            [],
+        )
+    });
+    assert!(ws2.is_ok(), "a second workspace can exist beside the legacy one");
+    let dup_in_ws2 = db.with(|c| {
+        c.execute(
+            "INSERT INTO channels (workspace_id, name, topic, created_at) VALUES (2, 'general', NULL, '2026-01-02T00:00:00Z')",
+            [],
+        )
+    });
+    assert!(dup_in_ws2.is_ok(), "another workspace may have its own #general");
+
+    // And the migrated DB serves the API: the legacy agent is isolated.
+    let state = aghub::state::AppState::new(db, reqwest::Client::builder().build().unwrap());
+    let router = aghub::api::build_router(state);
+    let (status, v) = call(&router, "GET", "/v1/agents", Some("tok-sekar"), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let ids: Vec<i64> = v["agents"].as_array().unwrap().iter().map(|a| a["id"].as_i64().unwrap()).collect();
+    assert_eq!(ids, vec![1, 2], "sekar sees both legacy agents in workspace 1");
+    let (status, v) = call(&router, "GET", "/v1/channels/1/messages", Some("tok-sekar"), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["messages"].as_array().unwrap().len(), 2, "legacy messages readable in place");
+    let (status, v) = call(&router, "GET", "/v1/memory?query=kopi", Some("tok-sekar"), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["memories"].as_array().unwrap().len(), 1, "legacy private memory recalls");
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
+}
+
+

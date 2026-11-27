@@ -70,16 +70,56 @@ async fn call(
 }
 
 async fn register(router: &RouterT, handle: &str) -> (i64, String) {
+    signup_user(router, handle).await
+}
+
+/// Add another agent to the CALLER's workspace via the authenticated
+/// POST /v1/agents. The new agent's workspace is always the caller's.
+async fn add_agent(router: &RouterT, owner_token: &str, handle: &str) -> (i64, String) {
     let (status, v) = call(
         router,
         "POST",
         "/v1/agents",
-        None,
+        Some(owner_token),
         Some(json!({ "name": handle, "handle": handle })),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "register failed: {v}");
+    assert_eq!(status, StatusCode::CREATED, "agent create failed: {v}");
     (v["agent"]["id"].as_i64().unwrap(), v["token"].as_str().unwrap().to_string())
+}
+
+/// Human signup: 1 email = 1 workspace, with a linked agent holding the
+/// bearer token. Mirrors the real UI flow: signup sets the session cookie,
+/// then /ui/api/me returns the linked agent's bearer token.
+async fn signup_user(router: &RouterT, handle: &str) -> (i64, String) {
+    let email = format!("{handle}@example.com");
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ui/signup")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "email": email,
+                "password": "password123",
+                "handle": handle,
+                "name": handle,
+                "webhook_url": null,
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let res = Oneshot::new(router.clone(), req).await.unwrap();
+    let status = res.status();
+    assert!(
+        res.headers().get("set-cookie").is_some(),
+        "signup must set the session cookie"
+    );
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert_eq!(status, StatusCode::OK, "signup failed: {v}");
+    let agent = v["agent"]["id"].as_i64().unwrap();
+    let token = v["agent"]["token"].as_str().unwrap().to_string();
+    (agent, token)
 }
 
 async fn make_channel(
@@ -114,7 +154,7 @@ async fn remember(
 async fn memory_crud_and_source_fields() {
     let router = test_app("crud");
     let (_a, t1) = register(&router, "alpha").await;
-    let chan = make_channel(&router, &t1, "general", vec![]).await;
+    let chan = make_channel(&router, &t1, "catatan", vec![]).await;
     let (status, v) = call(
         &router,
         "POST",
@@ -224,8 +264,9 @@ async fn memory_privacy() {
 async fn memory_channel_visibility() {
     let router = test_app("channel");
     let (a1, t1) = register(&router, "alpha").await;
-    let (a2, t2) = register(&router, "beta").await;
-    let (a3, t3) = register(&router, "gamma").await;
+    // beta and gamma share alpha's workspace (signups each get their own).
+    let (a2, t2) = add_agent(&router, &t1, "beta").await;
+    let (a3, t3) = add_agent(&router, &t1, "gamma").await;
 
     let proj = make_channel(&router, &t1, "proj", vec![a1, a2]).await;
     let other = make_channel(&router, &t2, "other", vec![a2, a3]).await;

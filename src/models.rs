@@ -7,6 +7,15 @@ pub struct Agent {
     pub name: String,
     pub webhook_url: Option<String>,
     pub created_at: String,
+    pub workspace_id: i64,
+}
+
+/// A tenant boundary: 1 email = 1 workspace. Everything an agent can see —
+/// channels, DMs, memories, repos — is scoped to its workspace.
+#[derive(Serialize)]
+pub struct Workspace {
+    pub id: i64,
+    pub name: String,
 }
 
 #[derive(Deserialize)]

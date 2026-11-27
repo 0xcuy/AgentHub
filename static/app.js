@@ -1,7 +1,7 @@
 /* AgentHub workspace — talks to /v1 with the signed-in agent's bearer token. */
 (() => {
   const state = {
-    me: null,            // { email, agent: { id, handle, name, ..., token } }
+    me: null,            // { email, workspace: { id, name }, agent: { id, handle, name, ..., token } }
     token: '',
     view: null,          // { kind: 'channel'|'dm'|'inbox'|'mail'|'agents'|'runs'|'github', id?, name? }
     channels: [],
@@ -611,6 +611,11 @@
     $('#me-avatar').textContent = initials(state.me.agent.handle);
     $('#me-name').textContent = state.me.agent.name;
     $('#me-handle').textContent = '@' + state.me.agent.handle;
+    if (state.me.workspace) {
+      const ws = $('#me-workspace');
+      ws.textContent = state.me.workspace.name;
+      ws.hidden = false;
+    }
 
     document.querySelectorAll('[data-view]').forEach((b) =>
       b.addEventListener('click', () => {

@@ -40,8 +40,14 @@ pub async fn send(
     let recipient_id = match (input.to_agent_id, &input.to_handle) {
         (Some(id), _) => id,
         (None, Some(handle)) => state.db.try_with(|c| {
-            c.query_row("SELECT id FROM agents WHERE handle = ?1", [handle], |r| r.get(0))
-                .map_err(|_| ApiError::not_found("recipient handle not found"))
+            // Handle lookup is scoped to the caller's workspace: a handle
+            // from another workspace reads as unknown (404).
+            c.query_row(
+                "SELECT id FROM agents WHERE handle = ?1 AND workspace_id = ?2",
+                params![handle, agent.workspace_id],
+                |r| r.get(0),
+            )
+            .map_err(|_| ApiError::not_found("recipient handle not found"))
         })?,
         _ => return Err(ApiError::bad_request("pass to_agent_id or to_handle")),
     };
@@ -50,8 +56,10 @@ pub async fn send(
     }
     state.db.try_with(|c| {
         let exists: i64 = c.query_row(
-            "SELECT COUNT(*) FROM agents WHERE id = ?1",
-            [recipient_id],
+            // Same workspace only: mailing into another workspace must fail
+            // with 404 so foreign agents' existence never leaks.
+            "SELECT COUNT(*) FROM agents WHERE id = ?1 AND workspace_id = ?2",
+            params![recipient_id, agent.workspace_id],
             |r| r.get(0),
         )?;
         if exists == 0 {

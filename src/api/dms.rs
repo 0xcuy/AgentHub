@@ -29,12 +29,13 @@ pub async fn list_partners(
     let partners = state.db.with(|c| {
         let mut stmt = c.prepare(
             "SELECT DISTINCT a.id, a.handle, a.name FROM agents a
-             WHERE a.id IN (
+             WHERE a.workspace_id = ?2
+               AND a.id IN (
                SELECT CASE WHEN sender_id = ?1 THEN recipient_id ELSE sender_id END
                FROM messages WHERE channel_id IS NULL AND (sender_id = ?1 OR recipient_id = ?1)
              ) ORDER BY a.id",
         )?;
-        stmt.query_map([agent.id], |r| {
+        stmt.query_map(params![agent.id, agent.workspace_id], |r| {
             Ok(serde_json::json!({ "id": r.get::<_, i64>(0)?, "handle": r.get::<_, String>(1)?, "name": r.get::<_, String>(2)? }))
         })
         .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
@@ -64,8 +65,10 @@ pub async fn send(
     let (message, run_ids, receipt_id) = state.db.with(|c| {
         let tx = c.transaction()?;
         let recipient_exists: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM agents WHERE id = ?1",
-            [recipient_id],
+            // Same workspace only: a DM into another workspace must fail with
+            // 404 so the recipient's existence is never leaked.
+            "SELECT COUNT(*) FROM agents WHERE id = ?1 AND workspace_id = ?2",
+            params![recipient_id, agent.workspace_id],
             |r| r.get(0),
         )?;
         if recipient_exists == 0 {
@@ -138,6 +141,16 @@ pub async fn list(
     let agent = require_agent(&state, &headers)?;
     let other_id = extract_id(Ok(other_id))?;
     let (after_id, limit, _) = page_params(&page);
+    let partner_exists: i64 = state.db.with(|c| {
+        c.query_row(
+            "SELECT COUNT(*) FROM agents WHERE id = ?1 AND workspace_id = ?2",
+            params![other_id, agent.workspace_id],
+            |r| r.get(0),
+        )
+    })?;
+    if partner_exists == 0 {
+        return Err(ApiError::not_found("partner not found"));
+    }
     let messages = state.db.with(|c| {
         let mut stmt = c.prepare(
             "SELECT msg.id, msg.channel_id, msg.sender_id, a.handle, msg.recipient_id, msg.body, msg.created_at
