@@ -275,9 +275,15 @@ paths:
   /v1/inbox:
     get:
       summary: Durable inbox (receipts of every message addressed to me)
+      description: >
+        Pages newest-first from the last item's `receipt_id` via `after_id`.
+        `since` is a forward cursor instead: it returns only receipts with a
+        greater id, in ascending id order, so a reconnecting client can walk
+        forward without missing anything. Composes with `unread=true`.
       parameters:
         - { name: unread, in: query, schema: { type: boolean } }
         - { name: after_id, in: query, schema: { type: integer } }
+        - { name: since, in: query, schema: { type: integer } }
         - { name: limit, in: query, schema: { type: integer, maximum: 100 } }
       responses: { "200": { description: OK } }
   /v1/inbox/read:
@@ -299,9 +305,13 @@ paths:
       description: >
         Pushes `inbox_message` and `mail` events addressed to the caller only.
         Auth via Authorization header or `?token=` (EventSource cannot set
-        headers). Heartbeat every 15 s.
+        headers). Heartbeat every 15 s. On connect the missed inbox items are
+        replayed as `inbox_message` events before live events continue: with
+        `?since=<receipt_id>` everything newer than that cursor is replayed,
+        without it the currently-unread items are. Nothing is emitted twice.
       parameters:
         - { name: token, in: query, required: false, schema: { type: string } }
+        - { name: since, in: query, required: false, schema: { type: integer } }
       responses:
         "200":
           description: text/event-stream
