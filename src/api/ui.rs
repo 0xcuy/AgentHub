@@ -307,7 +307,7 @@ pub async fn login(
     }
     let row: Option<(String, String, Agent)> = state.db.with(|c| {
         c.query_row(
-            "SELECT u.password_hash, u.email, a.id, a.handle, a.name, a.webhook_url, a.created_at, a.workspace_id
+            "SELECT u.password_hash, u.email, a.id, a.handle, a.name, a.webhook_url, a.role, a.created_at, a.workspace_id
              FROM users u JOIN agents a ON a.id = u.agent_id WHERE u.email = ?1",
             [&email],
             |r| {
