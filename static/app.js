@@ -1,8 +1,9 @@
-/* AgentHub workspace — talks to /v1 with the signed-in agent's bearer token. */
+/* AgentHub workspace — talks to /v1 via the HttpOnly session cookie; the
+   server bridges it to the signed-in agent's bearer token (main.rs). */
 (() => {
   const state = {
-    me: null,            // { email, workspace: { id, name }, agent: { id, handle, name, ..., token } }
-    token: '',
+    me: null,            // { email, is_workspace_admin, workspace: { id, name, slug }, agent: { id, handle, name, role, … } — no token, by design }
+    token: '',           // stays empty: the cookie bridge authenticates /v1
     view: null,          // { kind: 'channel'|'dm'|'inbox'|'mail'|'agents'|'runs'|'github'|'notes'|'note', id?, name? }
     channels: [],
     agents: [],
@@ -51,11 +52,14 @@
   const stag = (i) => Math.min(i, 10) * 40;
 
   async function api(path, opts = {}) {
+    // The UI holds no bearer token by design: /ui/api/me omits it and the
+    // server bridges the HttpOnly session cookie onto /v1. Send an
+    // Authorization header only if one exists.
     const res = await fetch(path, {
       ...opts,
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${state.token}`,
+        ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}),
         ...(opts.headers || {}),
       },
     });
@@ -467,8 +471,13 @@
       const v = await api('/v1/agents?limit=100');
       state.agents = v.agents ?? [];
       paneSub.textContent = `${state.agents.length} registered`;
-      stream.innerHTML = `<div style="display:flex;justify-content:flex-end;margin-bottom:var(--sp-3)">
-          <button class="btn btn-primary" id="agents-add">+ Add agent</button></div>` +
+      // Creating agents and rotating their keys mints credentials, so only
+      // the workspace admin (the signed-in human's agent) sees the buttons.
+      // The server enforces this too — these are affordances, not the gate.
+      const isAdmin = !!state.me?.is_workspace_admin;
+      stream.innerHTML = `${isAdmin
+        ? `<div style="display:flex;justify-content:flex-end;margin-bottom:var(--sp-3)">
+            <button class="btn btn-primary" id="agents-add">+ Add agent</button></div>` : ''}` +
         state.agents.map((a, x) => `
         <div class="row enter" style="--d:${stag(x)}ms">
           ${avatarEl(a.handle)}
@@ -481,6 +490,7 @@
               <button class="btn" type="submit">Set role</button>
             </form>
           </div>
+          ${isAdmin ? `<button class="btn" data-regen="${a.id}">Regenerate key</button>` : ''}
           ${a.id === state.me.agent.id
             ? '<span class="badge ok"><span class="dot"></span>you</span>'
             : `<button class="btn" data-dm="${a.id}">Message</button>`}
@@ -488,6 +498,8 @@
       stream.querySelectorAll('[data-dm]').forEach((b) =>
         b.addEventListener('click', () => showDm(+b.dataset.dm)));
       $('#agents-add')?.addEventListener('click', openAddAgentDialog);
+      stream.querySelectorAll('[data-regen]').forEach((b) =>
+        b.addEventListener('click', () => rotateAgentKey(+b.dataset.regen, b)));
       stream.querySelectorAll('form.role-edit').forEach((f) =>
         f.addEventListener('submit', (e) => { e.preventDefault(); setAgentRole(+f.dataset.roleFor, f); }));
     } catch (e) {
@@ -558,6 +570,41 @@
       msg.textContent = err.message;
     } finally {
       create.disabled = false;
+    }
+  }
+
+  /* ---------- API keys (shown once, never stored) ---------- */
+  // A rotated key is shown ONCE in a dialog and never stored — not in
+  // state, localStorage or anywhere else. Closing the dialog discards it;
+  // the only way to see a key again is to rotate it again.
+  function showKeyOnce(token, title) {
+    $('#token-dialog-title').textContent = title;
+    $('#token-box').textContent = token || '(the server returned no token)';
+    $('#token-copy').textContent = 'Copy';
+    $('#token-dialog').showModal();
+  }
+
+  async function rotateAgentKey(agentId, btn) {
+    const a = state.agents.find((x) => x.id === agentId);
+    if (!confirm(`Regenerate the API key for @${a?.handle ?? agentId}? The old key stops working immediately.`)) return;
+    btn.disabled = true;
+    try {
+      const v = await api(`/v1/agents/${agentId}/token`, { method: 'POST' });
+      showKeyOnce(v?.token, `@${a?.handle ?? 'agent'} — new API key`);
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function rotateMyKey() {
+    if (!confirm('Regenerate your API key? The old key stops working immediately.')) return;
+    try {
+      const v = await api('/v1/agents/me/token', { method: 'POST' });
+      showKeyOnce(v?.token, 'Your new API key');
+    } catch (err) {
+      alert(err.message);
     }
   }
 
@@ -1228,12 +1275,15 @@
     try { await navigator.clipboard.writeText($('#aa-token-box').textContent); $('#aa-copy').textContent = 'Copied'; } catch {}
   });
 
-  $('#token-btn').addEventListener('click', () => {
-    $('#token-box').textContent = state.token;
-    $('#token-dialog').showModal();
-  });
+  // "My key": the server never hands the browser a stored token (/ui/api/me
+  // omits it by design), so this button ROTATES the key and shows the new
+  // one once instead of displaying a token the UI never had.
+  $('#token-btn').addEventListener('click', rotateMyKey);
   $('#token-copy').addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(state.token); $('#token-copy').textContent = 'Copied'; } catch {}
+    try { await navigator.clipboard.writeText($('#token-box').textContent); $('#token-copy').textContent = 'Copied'; } catch {}
+  });
+  $('#token-dialog').addEventListener('close', () => {
+    $('#token-box').textContent = ''; // closing the dialog discards the key
   });
 
   $('#logout-btn').addEventListener('click', async () => {
@@ -1315,11 +1365,14 @@
       showBootError(new Error('The hub answered with unexpected data'), boot);
       return;
     }
-    state.token = state.me.agent.token;
-
+    // state.token stays empty by design: /ui/api/me never includes it and
+    // the cookie bridge authenticates /v1 calls server-side.
     $('#me-avatar').textContent = initials(state.me.agent.handle);
     $('#me-name').textContent = state.me.agent.name;
     $('#me-handle').textContent = '@' + state.me.agent.handle + (state.me.agent.role ? ` · ${state.me.agent.role}` : '');
+    // Only the workspace admin can create agents — hide the affordance for
+    // plain members (the server enforces it regardless).
+    $('#add-agent').hidden = !state.me.is_workspace_admin;
     if (state.me.workspace) {
       const ws = $('#me-workspace');
       ws.textContent = state.me.workspace.name;

@@ -47,6 +47,10 @@ paths:
         valid bearer token; unauthenticated calls return 401. Open
         self-registration is gone — an agent is always created inside the
         caller's workspace. Humans get their first agent at /ui/signup.
+        Breaking change (owner API keys): only the workspace admin (the
+        agent linked to the workspace's human owner) may create agents;
+        plain members get 403. The workspace's owner creates agents from
+        the Hub UI, which shows the new token once.
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -63,6 +67,7 @@ paths:
         "201": { description: Created inside the caller's workspace }
         "400": { description: Validation error }
         "401": { description: Missing or invalid token }
+        "403": { description: Caller is not the workspace admin }
         "409": { description: Handle taken }
     get:
       summary: List agents in the caller's workspace
@@ -104,6 +109,32 @@ paths:
                 properties:
                   token: { type: string }
         "401": { description: Bad token }
+  /v1/agents/{id}/token:
+    post:
+      summary: Rotate another agent's bearer token (workspace admin only)
+      description: >
+        Mints a fresh token for agent {id} and returns it ONCE — here and
+        nowhere else; the old token is revoked immediately. Only the
+        workspace admin (the agent linked to the workspace's human owner)
+        may call this; plain members get 403 (they rotate their own key
+        with POST /v1/agents/me/token). The target must live in the
+        caller's workspace — a cross-workspace id is a 404 that never
+        leaks the agent's existence.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses:
+        "200":
+          description: OK, returns the new token once
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agent: { type: object }
+                  token: { type: string }
+        "401": { description: Bad token }
+        "403": { description: Caller is not the workspace admin }
+        "404": { description: No such agent in the caller's workspace }
   /v1/agents/{id}:
     patch:
       summary: Set an agent's role (the agent itself, or the workspace admin)
