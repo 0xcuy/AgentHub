@@ -141,7 +141,9 @@ async fn add_agent(
         Some(json!({ "name": handle, "handle": handle, "webhook_url": webhook })),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "agent create failed: {v}");
+    // Never embed the response body here: on a botched 2xx it would print
+    // the freshly minted token into the test output.
+    assert_eq!(status, StatusCode::CREATED, "agent create failed for {handle}");
     (v["agent"]["id"].as_i64().unwrap(), v["token"].as_str().unwrap().to_string())
 }
 
@@ -696,6 +698,256 @@ async fn token_rotation_revokes_old_token() {
     let (status, v2) = call(&router, "GET", "/v1/agents/me", Some(&new_token), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v2["agent"]["handle"], "alpha");
+}
+
+// --- owner self-service API keys (workspace admin only) ---
+
+/// POST /ui/login and return the session cookie.
+async fn login_cookie(router: &RouterT, email: &str) -> String {
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ui/login")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({ "email": email, "password": "password123" }).to_string(),
+        ))
+        .unwrap();
+    let res = Oneshot::new(router.clone(), req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "login {email} must succeed");
+    res.headers()
+        .get("set-cookie")
+        .expect("login sets the session cookie")
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+/// GET /ui/api/me with a session cookie: status, parsed body and raw text.
+async fn me_with_cookie(router: &RouterT, cookie: &str) -> (StatusCode, Value, String) {
+    let req = Request::builder()
+        .uri("/ui/api/me")
+        .header("cookie", cookie)
+        .body(Body::empty())
+        .unwrap();
+    let res = Oneshot::new(router.clone(), req).await.unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let raw = String::from_utf8_lossy(&bytes).into_owned();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null), raw)
+}
+
+/// POST /v1/agents as the signup owner (a workspace admin): 201, a non-empty
+/// token, and that token authenticates as the freshly created agent.
+#[tokio::test]
+async fn admin_creates_agent_and_its_token_authenticates() {
+    let router = test_app("keyCreate");
+    let (_owner, owner_token) = register(&router, "kc-owner", None).await;
+    // add_agent asserts 201 and a usable token field for "kc-bot".
+    let (bot_id, bot_token) = add_agent(&router, &owner_token, "kc-bot", None).await;
+    assert!(!bot_token.is_empty(), "the create response must carry a token");
+
+    // The minted token authenticates as the new agent, in the owner's workspace.
+    let (status, v) = call(&router, "GET", "/v1/agents/me", Some(&bot_token), None).await;
+    assert_eq!(status, StatusCode::OK, "the minted token must authenticate");
+    assert_eq!(v["agent"]["id"].as_i64(), Some(bot_id));
+    assert_eq!(v["agent"]["handle"], "kc-bot");
+    let (status, v) = call(&router, "GET", "/v1/agents", Some(&bot_token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["agents"].as_array().unwrap().len(), 2, "same workspace");
+}
+
+/// Creating agents is workspace-admin only now: a plain member gets 403 and
+/// mints nothing.
+#[tokio::test]
+async fn non_admin_member_cannot_create_agents() {
+    let router = test_app("keyNoCreate");
+    let (_owner, owner_token) = register(&router, "nc-owner", None).await;
+    let (_member, member_token) = add_agent(&router, &owner_token, "nc-member", None).await;
+
+    let (status, _) = call(
+        &router,
+        "POST",
+        "/v1/agents",
+        Some(&member_token),
+        Some(json!({ "name": "nc-peer", "handle": "nc-peer", "webhook_url": null })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "members must not mint tokens");
+    // and nothing was created
+    let (status, v) = call(&router, "GET", "/v1/agents", Some(&owner_token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["agents"].as_array().unwrap().len(), 2);
+}
+
+/// POST /v1/agents/{id}/token as the workspace admin: the new token works,
+/// the old one is revoked immediately.
+#[tokio::test]
+async fn admin_rotates_another_agents_token() {
+    let router = test_app("keyRotate");
+    let (_owner, owner_token) = register(&router, "rot-owner", None).await;
+    let (bot_id, bot_token) = add_agent(&router, &owner_token, "rot-bot", None).await;
+
+    let (status, v) = call(
+        &router,
+        "POST",
+        &format!("/v1/agents/{bot_id}/token"),
+        Some(&owner_token),
+        None,
+    )
+    .await;
+    // Never print the response body here — it carries the fresh token.
+    assert_eq!(status, StatusCode::OK, "admin rotate must succeed");
+    assert_eq!(v["agent"]["id"].as_i64(), Some(bot_id));
+    let new_token = v["token"].as_str().expect("rotate returns a token").to_string();
+    assert!(!new_token.is_empty());
+
+    // the new token authenticates as the target agent...
+    let (status, v) = call(&router, "GET", "/v1/agents/me", Some(&new_token), None).await;
+    assert_eq!(status, StatusCode::OK, "the new token must work");
+    assert_eq!(v["agent"]["id"].as_i64(), Some(bot_id));
+    // ...and the old one is revoked immediately
+    let (status, _) = call(&router, "GET", "/v1/agents/me", Some(&bot_token), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "the old token must be dead");
+}
+
+/// A plain member cannot rotate anyone's key — not a peer's, not even its
+/// own through the {id} route (self-rotation stays on /v1/agents/me/token).
+#[tokio::test]
+async fn non_admin_cannot_rotate_anyones_token() {
+    let router = test_app("keyNoRotate");
+    let (_owner, owner_token) = register(&router, "nr-owner", None).await;
+    let (member_id, member_token) = add_agent(&router, &owner_token, "nr-member", None).await;
+    let (peer_id, peer_token) = add_agent(&router, &owner_token, "nr-peer", None).await;
+
+    for target in [peer_id, member_id] {
+        let (status, _) = call(
+            &router,
+            "POST",
+            &format!("/v1/agents/{target}/token"),
+            Some(&member_token),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "member rotate of {target} must be 403");
+    }
+    // nothing changed: the peer's key still works
+    let (status, v) = call(&router, "GET", "/v1/agents/me", Some(&peer_token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["agent"]["id"].as_i64(), Some(peer_id));
+    // ...but the self-rotate endpoint keeps working for everyone
+    let (status, v) = call(&router, "POST", "/v1/agents/me/token", Some(&member_token), None).await;
+    assert_eq!(status, StatusCode::OK, "self-rotate must keep working");
+    assert!(v["token"].as_str().map(|t| !t.is_empty()).unwrap_or(false));
+    let (status, _) = call(&router, "GET", "/v1/agents/me", Some(&member_token), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "the old self token is revoked");
+}
+
+/// Rotating an agent that lives in ANOTHER workspace is a 404 that never
+/// leaks the agent's existence — and does not revoke anything.
+#[tokio::test]
+async fn rotating_an_agent_in_another_workspace_is_not_found() {
+    let router = test_app("keyRotateCross");
+    let (_a, a_token) = register(&router, "cross-a", None).await;
+    let (b_id, b_token) = register(&router, "cross-b", None).await;
+
+    let (status, _) = call(
+        &router,
+        "POST",
+        &format!("/v1/agents/{b_id}/token"),
+        Some(&a_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "cross-workspace ids are 404");
+    let (status, _) = call(&router, "GET", "/v1/agents/me", Some(&b_token), None).await;
+    assert_eq!(status, StatusCode::OK, "the target's key must be untouched");
+}
+
+/// The directory listing never carries a token field — not the key itself,
+/// not even the word.
+#[tokio::test]
+async fn agents_list_entries_never_contain_a_token() {
+    let router = test_app("keyListLeak");
+    let (_owner, owner_token) = register(&router, "ll-owner", None).await;
+    let (_bot_id, bot_token) = add_agent(&router, &owner_token, "ll-bot", None).await;
+
+    let (status, v) = call(&router, "GET", "/v1/agents", Some(&owner_token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let agents = v["agents"].as_array().unwrap();
+    assert_eq!(agents.len(), 2);
+    assert!(
+        agents.iter().all(|a| a.get("token").is_none()),
+        "no entry may carry a token field"
+    );
+    let raw = v.to_string();
+    assert!(!raw.contains(&owner_token) && !raw.contains(&bot_token));
+    assert!(!raw.contains("\"token\""), "the listing must not even name the field");
+}
+
+/// /ui/api/me tells the UI whether the signed-in human's agent is the
+/// workspace admin — and still never exposes any token. An invited member's
+/// human session must report is_workspace_admin: false.
+#[tokio::test]
+async fn ui_me_reports_workspace_admin_and_never_a_token() {
+    let router = test_app("keyMeAdmin");
+    let (_owner, owner_token) = register(&router, "ma-owner", None).await;
+
+    // The signup owner is the workspace admin.
+    let cookie = login_cookie(&router, "ma-owner@example.com").await;
+    let (status, v, raw) = me_with_cookie(&router, &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["is_workspace_admin"], true, "the owner is the admin: {raw}");
+    assert!(v["agent"].get("token").is_none(), "me must never carry a token");
+    assert!(
+        !raw.contains(&owner_token),
+        "the bearer token must never appear in /ui/api/me"
+    );
+
+    // Invite a second human: their agent joins the owner's workspace as a
+    // plain member, so their session must NOT be a workspace admin.
+    let (status, v) = call(
+        &router,
+        "POST",
+        "/v1/workspaces/invites",
+        Some(&owner_token),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "invite creation: {v}");
+    let invite = v["invite"]["token"].as_str().unwrap().to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ui/signup")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "email": "ma-guest@example.com",
+                "password": "password123",
+                "handle": "ma-guest",
+                "name": "ma-guest",
+                "webhook_url": null,
+                "invite_token": invite,
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let res = Oneshot::new(router.clone(), req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "invited signup must succeed");
+
+    let guest_cookie = login_cookie(&router, "ma-guest@example.com").await;
+    let (status, v, raw) = me_with_cookie(&router, &guest_cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["is_workspace_admin"], false, "a member is not the admin: {raw}");
+    assert!(v["agent"].get("token").is_none());
+    // the guest landed in the owner's workspace
+    let (_, owner_me, _) = me_with_cookie(&router, &cookie).await;
+    assert_eq!(
+        v["workspace"]["id"], owner_me["workspace"]["id"],
+        "the invited member shares the owner's workspace"
+    );
 }
 
 // --- Phase 2: rate limiting ---

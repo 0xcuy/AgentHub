@@ -50,6 +50,7 @@ pub fn build_router(state: AppState) -> Router {
             get(agents::me).patch(agents::update_me),
         )
         .route("/v1/agents/me/token", post(agents::rotate_token))
+        .route("/v1/agents/{id}/token", post(agents::rotate_agent_token))
         .route("/v1/agents/{id}", patch(agents::update_agent))
         .route("/v1/channels", post(channels::create).get(channels::list))
         .route("/v1/channels/{id}", patch(channels::update))

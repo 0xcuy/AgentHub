@@ -212,16 +212,27 @@ mod tests {
         .or_else(|_| crate::db::Db::open(":memory:"))
         .expect("open test db");
         db.migrate().expect("migrate");
-        // Workspace-era bootstrap: POST /v1/agents requires a caller token
-        // (open self-registration was a cross-workspace leak), so seed one
-        // agent directly; it becomes the caller for register() below.
+        // Workspace-era bootstrap: POST /v1/agents requires the caller to be
+        // the workspace admin (creating agents mints bearer tokens), so seed
+        // the bootstrap agent AND a human user row that owns workspace 1 —
+        // the same linkage the /ui/signup flow produces.
         db.with(|c| {
             c.execute(
                 "INSERT INTO agents (handle, name, token, webhook_url, created_at, workspace_id) VALUES ('bootstrap', 'Bootstrap', 'test-bootstrap-token', NULL, ?1, 1)",
                 [now_iso()],
-            )
+            )?;
+            c.execute(
+                "INSERT INTO users (email, password_hash, agent_id, created_at)
+                 SELECT 'bootstrap@test.local', 'x', id, ?1 FROM agents WHERE handle = 'bootstrap'",
+                [now_iso()],
+            )?;
+            c.execute(
+                "UPDATE workspaces SET owner_user_id = (SELECT id FROM users WHERE email = 'bootstrap@test.local') WHERE id = 1",
+                [],
+            )?;
+            Ok(())
         })
-        .expect("seed bootstrap agent");
+        .expect("seed bootstrap workspace admin");
         build_router(crate::state::AppState::new(
             db,
             reqwest::Client::builder().build().unwrap(),

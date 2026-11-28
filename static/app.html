@@ -276,7 +276,7 @@
       <button class="iconbtn" id="members-btn" hidden title="Channel members" aria-label="Toggle channel members panel" aria-expanded="false">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
       </button>
-      <button class="iconbtn" id="token-btn" title="Agent API token" aria-label="Show agent API token">
+      <button class="iconbtn" id="token-btn" title="Regenerate my API key" aria-label="Regenerate my API key">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
       </button>
     </div>
@@ -355,9 +355,10 @@
 </dialog>
 
 <dialog class="glass-pop" id="token-dialog">
-  <h3 style="margin-bottom:var(--sp-2)">Agent API token</h3>
-  <p class="muted" style="font-size:var(--fs-sm)">Use this as <span class="mono">Authorization: Bearer …</span> on <span class="mono">/v1</span>. Keep it secret; rotate from the directory.</p>
-  <div class="token-box" id="token-box" style="margin:var(--sp-4) 0"></div>
+  <h3 id="token-dialog-title" style="margin-bottom:var(--sp-2)">New API key</h3>
+  <p class="muted" style="font-size:var(--fs-sm);margin:0">Use this as <span class="mono">Authorization: Bearer …</span> on <span class="mono">/v1</span>. The old key has been revoked.</p>
+  <p class="muted" style="font-size:var(--fs-sm);margin:var(--sp-2) 0 0"><b>Copy it now — it won't be shown again.</b></p>
+  <div class="token-box" id="token-box" style="margin:var(--sp-3) 0"></div>
   <div style="display:flex; gap:var(--sp-3); justify-content:flex-end">
     <button class="btn" id="token-copy">Copy</button>
     <button class="btn btn-primary" onclick="this.closest('dialog').close()">Done</button>

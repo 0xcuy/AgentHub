@@ -405,8 +405,13 @@ pub async fn me(
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
             })?;
+            // The owner uses the Hub UI to create agents and rotate their
+            // keys, so the UI needs to know whether the signed-in human's
+            // agent is the workspace admin. Still metadata only — no token.
+            let is_workspace_admin = super::agents::is_workspace_admin(&state, &s.agent)?;
             Ok(Json(serde_json::json!({
                 "email": s.email,
+                "is_workspace_admin": is_workspace_admin,
                 "agent": {
                     "id": s.agent.id,
                     "handle": s.agent.handle,

@@ -25,14 +25,44 @@ fn map_agent_row(r: &rusqlite::Row) -> rusqlite::Result<Agent> {
 
 const AGENT_COLS: &str = "id, handle, name, webhook_url, role, created_at, workspace_id";
 
+/// The workspace admin is the agent tied to the workspace's human user
+/// account (the signup that created the workspace). Shared by everything
+/// that mints or changes credentials and by role management.
+pub fn is_workspace_admin(state: &AppState, agent: &Agent) -> Result<bool, ApiError> {
+    Ok(state.db.with(|c| {
+        c.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM workspaces w
+               JOIN users u ON u.id = w.owner_user_id
+               WHERE w.id = ?1 AND u.agent_id = ?2
+             )",
+            params![agent.workspace_id, agent.id],
+            |r| r.get(0),
+        )
+    })?)
+}
+
+fn require_workspace_admin(state: &AppState, caller: &Agent) -> Result<(), ApiError> {
+    if is_workspace_admin(state, caller)? {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden_msg(
+            "only the workspace admin (the workspace's human owner) can do this",
+        ))
+    }
+}
+
 /// Create an agent inside the CALLER's workspace. Authentication is required:
 /// open self-registration was a cross-workspace leak. Breaking change.
+/// Workspace-admin only: creating an agent mints a bearer token, so a plain
+/// member may not — the workspace's human owner does this from the Hub UI.
 pub async fn create(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(input): Json<CreateAgent>,
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = require_agent(&state, &headers)?;
+    require_workspace_admin(&state, &caller)?;
     if input.name.trim().is_empty() {
         return Err(ApiError::bad_request("name must not be empty"));
     }
@@ -167,23 +197,10 @@ pub async fn update_agent(
             |r| r.get(0),
         )
     })?;
-    if target != caller.id {
-        let is_workspace_admin: bool = state.db.with(|c| {
-            c.query_row(
-                "SELECT EXISTS(
-                   SELECT 1 FROM workspaces w
-                   JOIN users u ON u.id = w.owner_user_id
-                   WHERE w.id = ?1 AND u.agent_id = ?2
-                 )",
-                params![caller.workspace_id, caller.id],
-                |r| r.get(0),
-            )
-        })?;
-        if !is_workspace_admin {
-            return Err(ApiError::forbidden_msg(
-                "only the agent itself or a workspace admin can set its role",
-            ));
-        }
+    if target != caller.id && !is_workspace_admin(&state, &caller)? {
+        return Err(ApiError::forbidden_msg(
+            "only the agent itself or a workspace admin can set its role",
+        ));
     }
     let updated = state.db.with(|c| {
         c.query_row(
@@ -207,6 +224,38 @@ pub async fn rotate_token(
         c.query_row(
             &format!("UPDATE agents SET token = ?1 WHERE id = ?2 RETURNING {AGENT_COLS}"),
             params![token, agent.id],
+            map_agent_row,
+        )
+    })?;
+    Ok(Json(serde_json::json!({ "agent": updated, "token": token })))
+}
+
+/// POST /v1/agents/{id}/token — rotate another agent's token. Workspace
+/// admin only: minting credentials is the workspace's human owner's job, so
+/// the owner can provision agents from the Hub UI without an operator.
+/// The fresh token is returned ONCE, here and nowhere else; the old one is
+/// revoked immediately. Scoped like update_agent: the target must live in
+/// the caller's workspace, so a cross-workspace id is a plain 404 that
+/// never leaks the agent's existence.
+pub async fn rotate_agent_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let caller = require_agent(&state, &headers)?;
+    let target: i64 = state.db.with(|c| {
+        c.query_row(
+            "SELECT id FROM agents WHERE id = ?1 AND workspace_id = ?2",
+            params![id, caller.workspace_id],
+            |r| r.get(0),
+        )
+    })?;
+    require_workspace_admin(&state, &caller)?;
+    let token = gen_token();
+    let updated = state.db.with(|c| {
+        c.query_row(
+            &format!("UPDATE agents SET token = ?1 WHERE id = ?2 RETURNING {AGENT_COLS}"),
+            params![token, target],
             map_agent_row,
         )
     })?;
