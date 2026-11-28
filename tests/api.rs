@@ -791,6 +791,150 @@ async fn non_admin_member_cannot_create_agents() {
     assert_eq!(v["agents"].as_array().unwrap().len(), 2);
 }
 
+/// Flip the creation-only is_admin flag (migration 0014) for a test agent,
+/// keyed by handle. In production the migration sets it for the owner's
+/// assistant ('sekar'); tests flag their own handles the same way.
+fn flag_create_admin(state: &aghub::state::AppState, handle: &str) {
+    state
+        .db
+        .with(|c| c.execute("UPDATE agents SET is_admin = 1 WHERE handle = ?1", [handle]))
+        .expect("set is_admin flag");
+}
+
+/// The owner's admin-flagged assistant may create agents (201); a plain
+/// member may not, even with the same handle before the flag is set.
+#[tokio::test]
+async fn admin_flagged_assistant_can_create_agents() {
+    let (router, state) = test_app_with_state("keyAsstCreate");
+    let (_owner, owner_token) = register(&router, "ac-owner", None).await;
+    let (assistant_id, assistant_token) =
+        add_agent(&router, &owner_token, "ac-assistant", None).await;
+
+    // Before the flag the assistant is a plain member: 403, nothing minted.
+    let (status, _) = call(
+        &router,
+        "POST",
+        "/v1/agents",
+        Some(&assistant_token),
+        Some(json!({ "name": "ac-early", "handle": "ac-early", "webhook_url": null })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "unflagged member must not create");
+
+    flag_create_admin(&state, "ac-assistant");
+    let (bot_id, bot_token) = add_agent(&router, &assistant_token, "ac-bot", None).await;
+
+    // The minted token authenticates as the new agent...
+    let (status, v) = call(&router, "GET", "/v1/agents/me", Some(&bot_token), None).await;
+    assert_eq!(status, StatusCode::OK, "the minted token must authenticate");
+    assert_eq!(v["agent"]["id"].as_i64(), Some(bot_id));
+    assert_eq!(v["agent"]["handle"], "ac-bot");
+    // ...and the new agent landed in the assistant's (i.e. the owner's) workspace.
+    let (_, v) = call(&router, "GET", "/v1/agents/me", Some(&assistant_token), None).await;
+    let ws = v["agent"]["workspace_id"].clone();
+    let (_, v) = call(&router, "GET", "/v1/agents/me", Some(&bot_token), None).await;
+    assert_eq!(
+        v["agent"]["workspace_id"], ws,
+        "created inside the caller's workspace"
+    );
+    let (status, v) = call(&router, "GET", "/v1/agents", Some(&owner_token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["agents"].as_array().unwrap().len(), 3, "same workspace");
+    assert!(assistant_id > 0);
+}
+
+/// An admin-flagged agent in workspace A only ever creates inside its OWN
+/// workspace: workspace B's membership and listings are untouched, and
+/// cross-workspace rotation stays a 404 that leaks nothing.
+#[tokio::test]
+async fn admin_flagged_agent_cannot_create_into_another_workspace() {
+    let (router, state) = test_app_with_state("keyAsstCross");
+    let (_a_owner, a_token) = register(&router, "cx-a-owner", None).await;
+    let (_a_asst, a_asst_token) = add_agent(&router, &a_token, "cx-a-asst", None).await;
+    let (b_owner, b_token) = register(&router, "cx-b-owner", None).await;
+    flag_create_admin(&state, "cx-a-asst");
+
+    // Create succeeds — but the agent always lands in the CALLER's workspace.
+    let (_bot_id, bot_token) = add_agent(&router, &a_asst_token, "cx-a-bot", None).await;
+    let (status, v) = call(&router, "GET", "/v1/agents/me", Some(&bot_token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let bot_ws = v["agent"]["workspace_id"].as_i64().unwrap();
+    let (status, v) = call(&router, "GET", "/v1/agents/me", Some(&b_token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(
+        bot_ws,
+        v["agent"]["workspace_id"].as_i64().unwrap(),
+        "the flag must never reach across workspaces"
+    );
+    // Workspace B still only has its own owner.
+    let (status, v) = call(&router, "GET", "/v1/agents", Some(&b_token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["agents"].as_array().unwrap().len(), 1, "workspace B is unchanged");
+    // Cross-workspace rotation is still a plain 404 (not 403, not a leak).
+    let (status, _) = call(
+        &router,
+        "POST",
+        &format!("/v1/agents/{b_owner}/token"),
+        Some(&a_asst_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "cross-workspace ids are 404");
+}
+
+/// The is_admin flag grants creation ONLY: rotation (and role management)
+/// stay owner-only for a flagged assistant.
+#[tokio::test]
+async fn admin_flagged_agent_cannot_rotate_tokens_or_manage_roles() {
+    let (router, state) = test_app_with_state("keyAsstNoRotate");
+    let (_owner, owner_token) = register(&router, "nr2-owner", None).await;
+    let (peer_id, _peer_token) = add_agent(&router, &owner_token, "nr2-peer", None).await;
+    let (assistant_id, assistant_token) =
+        add_agent(&router, &owner_token, "nr2-assistant", None).await;
+    flag_create_admin(&state, "nr2-assistant");
+
+    // Creation works (that is the whole grant)...
+    let (_made_id, made_token) = add_agent(&router, &assistant_token, "nr2-made", None).await;
+    let (status, _) = call(&router, "GET", "/v1/agents/me", Some(&made_token), None).await;
+    assert_eq!(status, StatusCode::OK, "the assistant created a working agent");
+
+    // ...but rotating a peer's key through the {id} route is still 403.
+    for target in [peer_id, assistant_id] {
+        let (status, _) = call(
+            &router,
+            "POST",
+            &format!("/v1/agents/{target}/token"),
+            Some(&assistant_token),
+            None,
+        )
+        .await;
+        assert_eq!(
+            status, StatusCode::FORBIDDEN,
+            "rotate of {target} must stay owner-only"
+        );
+    }
+    // ...and so is setting another agent's role.
+    let (status, _) = call(
+        &router,
+        "PATCH",
+        &format!("/v1/agents/{peer_id}"),
+        Some(&assistant_token),
+        Some(json!({ "role": "QA" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "role management must stay owner-only");
+    // The owner still can.
+    let (status, _) = call(
+        &router,
+        "PATCH",
+        &format!("/v1/agents/{peer_id}"),
+        Some(&owner_token),
+        Some(json!({ "role": "QA" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "owner role management must keep working");
+}
+
 /// POST /v1/agents/{id}/token as the workspace admin: the new token works,
 /// the old one is revoked immediately.
 #[tokio::test]

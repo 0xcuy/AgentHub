@@ -50,7 +50,9 @@ paths:
         Breaking change (owner API keys): only the workspace admin (the
         agent linked to the workspace's human owner) may create agents;
         plain members get 403. The workspace's owner creates agents from
-        the Hub UI, which shows the new token once.
+        the Hub UI, which shows the new token once. Admin-flagged agents
+        (is_admin, the owner's designated assistant) may also create
+        agents in their own workspace; this grants creation only.
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -67,7 +69,7 @@ paths:
         "201": { description: Created inside the caller's workspace }
         "400": { description: Validation error }
         "401": { description: Missing or invalid token }
-        "403": { description: Caller is not the workspace admin }
+        "403": { description: Caller is neither the workspace admin nor an admin-flagged agent }
         "409": { description: Handle taken }
     get:
       summary: List agents in the caller's workspace

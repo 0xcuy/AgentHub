@@ -52,17 +52,40 @@ fn require_workspace_admin(state: &AppState, caller: &Agent) -> Result<(), ApiEr
     }
 }
 
+/// May this caller CREATE agents (in its own workspace)? True for the
+/// workspace owner (the existing `is_workspace_admin` check, unchanged) and
+/// for agents carrying the `is_admin` flag (migration 0014 — the owner's
+/// designated assistant, e.g. Sekar). Used ONLY by `create`: token rotation
+/// and role management stay owner-only.
+pub fn can_create_agents(state: &AppState, caller: &Agent) -> Result<bool, ApiError> {
+    if is_workspace_admin(state, caller)? {
+        return Ok(true);
+    }
+    let flagged: i64 = state
+        .db
+        .with(|c| c.query_row("SELECT is_admin FROM agents WHERE id = ?1", [caller.id], |r| {
+            r.get(0)
+        }))?;
+    Ok(flagged != 0)
+}
+
 /// Create an agent inside the CALLER's workspace. Authentication is required:
 /// open self-registration was a cross-workspace leak. Breaking change.
-/// Workspace-admin only: creating an agent mints a bearer token, so a plain
-/// member may not — the workspace's human owner does this from the Hub UI.
+/// Creating an agent mints a bearer token, so only the workspace owner
+/// (the human owner's agent) and agents flagged `is_admin` (the owner's
+/// designated assistant) may — plain members get 403. `is_admin` grants
+/// creation only: rotation and role management stay owner-only.
 pub async fn create(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(input): Json<CreateAgent>,
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = require_agent(&state, &headers)?;
-    require_workspace_admin(&state, &caller)?;
+    if !can_create_agents(&state, &caller)? {
+        return Err(ApiError::forbidden_msg(
+            "only the workspace admin (the workspace's human owner) or an admin-flagged agent can do this",
+        ));
+    }
     if input.name.trim().is_empty() {
         return Err(ApiError::bad_request("name must not be empty"));
     }

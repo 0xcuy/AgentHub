@@ -18,6 +18,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0011_urgent_flag", include_str!("../migrations/0011_urgent_flag.sql")),
     ("0012_msg_features", include_str!("../migrations/0012_msg_features.sql")),
     ("0013_reactions", include_str!("../migrations/0013_reactions.sql")),
+    (
+        "0014_agent_create_admin",
+        include_str!("../migrations/0014_agent_create_admin.sql"),
+    ),
 ];
 
 #[derive(Clone)]
