@@ -342,6 +342,15 @@ async fn channel_flow() {
     assert_eq!(status, StatusCode::OK);
     let items = v["items"].as_array().unwrap();
     assert!(items.iter().any(|i| i["message"]["id"].as_i64() == Some(msg_id)));
+    // The inbox Reply button routes by sender (and channel), so the row payload
+    // must carry both, or replying from the inbox has nowhere to go.
+    let item = items
+        .iter()
+        .find(|i| i["message"]["id"].as_i64() == Some(msg_id))
+        .expect("inbox carries the message");
+    assert_eq!(item["message"]["sender_id"].as_i64(), Some(a1));
+    assert_eq!(item["message"]["sender_handle"].as_str(), Some("alpha"));
+    assert_eq!(item["message"]["channel_id"].as_i64(), Some(chan_id));
     let (status, _) = call(&router, "POST", "/v1/inbox/read", Some(&t2), Some(json!({ "all": true }))).await;
     assert_eq!(status, StatusCode::OK);
     let (_, v) = call(&router, "GET", "/v1/inbox?unread=true", Some(&t2), None).await;

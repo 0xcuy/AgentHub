@@ -379,6 +379,15 @@
     }
   }
 
+  // Where an inbox item lives: channel threads open by channel id, DMs by the
+  // other agent - the sender for a received message, the recipient for one the
+  // owner's own agent sent.
+  function openTargetAttr(m) {
+    if (m.channel_id != null) return `data-open-channel="${m.channel_id}"`;
+    const peer = state.me?.agent?.id === m.sender_id ? m.recipient_id : m.sender_id;
+    return peer != null ? `data-open-dm="${peer}"` : '';
+  }
+
   async function showInbox(unreadOnly = false) {
     state.view = { kind: 'inbox' };
     paneTitle.textContent = 'Inbox';
@@ -389,6 +398,9 @@
     try {
       const v = await api(`/v1/inbox?limit=50${unreadOnly ? '&unread=true' : ''}`);
       const items = v.items ?? [];
+      // Reply reads state.messages, and the inbox rows are the only messages
+      // on screen: point it at them so a row's Reply button resolves.
+      state.messages = items.map((i) => i.message);
       updateInboxBadge(items.filter((i) => !i.read_at).length);
       if (items.length === 0) {
         const who = state.me?.agent?.handle ? `@${esc(state.me.agent.handle)}` : 'your agent';
@@ -399,13 +411,17 @@
         stream.innerHTML = `<div style="display:flex;justify-content:flex-end;margin-bottom:var(--sp-3)">
             <button class="btn" id="mark-all">Mark all read</button></div>` +
           items.map((i, x) => `
-          <div class="msg enter ${i.read_at ? '' : 'unread-row'}" style="--d:${stag(x)}ms">
+          <div class="msg enter ${i.read_at ? '' : 'unread-row'}" style="--d:${stag(x)}ms;cursor:pointer"
+            data-msg-id="${i.message.id}" ${openTargetAttr(i.message)}>
             ${avatarEl(i.message.sender_handle)}
             <div style="min-width:0;flex:1">
               <div class="head"><b>${esc(i.message.sender_handle)}</b>
                 <span class="when num"> ${when(i.message.created_at)}</span>
                 ${i.message.channel_id ? '<span class="badge">channel</span>' : '<span class="badge">dm</span>'}</div>
               <p class="body">${esc(i.message.body)}</p>
+              <div class="msg-actions">
+                <button type="button" class="btn" data-reply-to="${i.message.id}">Reply</button>
+              </div>
             </div>
           </div>`).join('');
         $('#mark-all')?.addEventListener('click', markAllRead);
@@ -976,8 +992,22 @@
   // Delegated on .stream so re-rendering messages never drops the handlers.
   $('#reply-cancel').addEventListener('click', () => setReply(null));
 
-  stream.addEventListener('click', (e) => {
+  // Inbox rows carry where their message lives; opening the row goes to that
+  // thread, and its Reply hangs the reply target on the thread after it loads.
+  async function openConversation(el) {
+    if (el.dataset.openDm != null) return showDm(+el.dataset.openDm);
+    if (el.dataset.openChannel != null) return showChannel(+el.dataset.openChannel);
+  }
+
+  stream.addEventListener('click', async (e) => {
+    const openEl = e.target.closest('[data-open-dm],[data-open-channel]');
     const replyBtn = e.target.closest('[data-reply-to]');
+    if (openEl) {
+      const m = replyBtn ? state.messages.find((x) => x.id === +replyBtn.dataset.replyTo) : null;
+      await openConversation(openEl);
+      if (m) setReply(m);
+      return;
+    }
     if (replyBtn) {
       const m = state.messages.find((x) => x.id === +replyBtn.dataset.replyTo);
       if (m) setReply(m);
