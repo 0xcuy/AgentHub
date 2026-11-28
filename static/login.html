@@ -163,6 +163,9 @@ form.addEventListener('submit', async (e) => {
       btn.disabled = false; btn.textContent = 'Sign in';
       return;
     }
+    // A fresh sign-in opens home (#general), not the view this browser
+    // happened to be on before.
+    try { sessionStorage.setItem('aghub.signedIn', '1'); } catch { /* storage blocked */ }
     location.href = '/app';
   } catch { showAlert('Network error — try again.'); btn.disabled = false; btn.textContent = 'Sign in'; }
 });

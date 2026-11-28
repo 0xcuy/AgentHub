@@ -19,6 +19,22 @@
     members: { channelId: null, seen: new Map(), adminProven: false, adminDisabled: false },
   };
 
+  const LAST_VIEW_KEY = 'aghub.view';
+  const VIEWS = {
+    inbox: () => showInbox(),
+    mail: () => showMail(),
+    agents: () => showAgents(),
+    runs: () => showRuns(),
+    github: () => showGithub(),
+    notes: () => showNotes(),
+  };
+  function saveView(view) {
+    try { localStorage.setItem(LAST_VIEW_KEY, JSON.stringify(view)); } catch { /* storage blocked */ }
+  }
+  function savedView() {
+    try { return JSON.parse(localStorage.getItem(LAST_VIEW_KEY) || 'null'); } catch { return null; }
+  }
+
   const $ = (sel) => document.querySelector(sel);
   // uuid() needs a secure-context fallback; self-hosted hubs often run on http.
   const uuid = () => crypto.randomUUID
@@ -51,6 +67,19 @@
      the animation itself lives in app.css (.enter / enterRise) */
   const stag = (i) => Math.min(i, 10) * 40;
 
+  /* One 401 is not proof the session is gone: a stale script talking to a
+     newer server, or a transient upstream error, produces one while the
+     cookie still works. Ask /ui/api/me (cookie-only) before throwing a
+     signed-in user back at /login. */
+  async function sessionStillValid() {
+    try {
+      const res = await fetch('/ui/api/me', { cache: 'no-store' });
+      return res.status !== 401;
+    } catch {
+      return true; // offline: stay on the page, don't demand a fresh login
+    }
+  }
+
   async function api(path, opts = {}) {
     // The UI holds no bearer token by design: /ui/api/me omits it and the
     // server bridges the HttpOnly session cookie onto /v1. Send an
@@ -63,7 +92,10 @@
         ...(opts.headers || {}),
       },
     });
-    if (res.status === 401) { location.href = '/login'; throw new Error('unauthorized'); }
+    if (res.status === 401 && !(await sessionStillValid())) {
+      location.href = '/login';
+      throw new Error('unauthorized');
+    }
     if (!res.ok) {
       const v = await res.json().catch(() => ({}));
       throw new Error(v.error?.message || `${res.status} ${res.statusText}`);
@@ -73,6 +105,9 @@
 
   /* ---------- sidebar ---------- */
   function renderNav() {
+    // Every view switch re-renders the sidebar, so this is the one place that
+    // sees the view the reader settles on: remember it for the next /app load.
+    if (state.view) saveView(state.view);
     /* the sidebar cascade plays once per boot: re-renders on every view
        switch must not replay it, or navigation would feel like a strobe */
     const boot = !state.navEntered;
@@ -1363,16 +1398,39 @@
     $('#retry-boot').addEventListener('click', retryFn);
   }
 
+  /* Where /app opens. Home is #general — the Inbox is one view in the
+     sidebar, not the landing page. A reload returns to the view you were
+     reading; a fresh sign-in (flagged by login.html/signup.html) goes home.
+     A remembered view that no longer exists falls back to home too. */
+  async function openLanding() {
+    let fresh = false;
+    try {
+      fresh = sessionStorage.getItem('aghub.signedIn') === '1';
+      sessionStorage.removeItem('aghub.signedIn');
+    } catch { /* storage blocked: treat it as a reload */ }
+    const saved = fresh ? null : savedView();
+    if (saved?.kind === 'channel' && state.channels.some((c) => c.id === saved.id)) {
+      return showChannel(saved.id);
+    }
+    if (saved?.kind === 'dm' && state.agents.some((a) => a.id === saved.id)) {
+      return showDm(saved.id);
+    }
+    if (saved && VIEWS[saved.kind]) return VIEWS[saved.kind]();
+    const home = state.channels.find((c) => (c.name || '').toLowerCase() === 'general')
+      || state.channels[0];
+    if (home) return showChannel(home.id);
+    return showInbox();
+  }
+
   async function initialLoad() {
     stream.innerHTML = '<div class="empty">Loading…</div>';
     try {
       await loadChannels();
       await loadDirectory();
+      await openLanding();
     } catch (err) {
       showBootError(err, initialLoad);
-      return;
     }
-    showInbox();
   }
 
   async function boot() {
