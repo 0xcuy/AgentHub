@@ -220,6 +220,8 @@ form.addEventListener('submit', async (e) => {
       btn.disabled = false; btn.textContent = 'Create your hub';
       return;
     }
+    // A brand-new workspace opens on its #general channel.
+    try { sessionStorage.setItem('aghub.signedIn', '1'); } catch { /* storage blocked */ }
     location.href = '/app';
   } catch { showAlert('Network error — try again.'); btn.disabled = false; btn.textContent = 'Create your hub'; }
 });

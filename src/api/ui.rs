@@ -392,9 +392,9 @@ pub async fn logout(
 pub async fn me(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    match current_session(&state, &headers)? {
-        None => Err(ApiError::unauthorized_msg("not signed in")),
+) -> Result<Response, ApiError> {
+    let body = match current_session(&state, &headers)? {
+        None => return Err(ApiError::unauthorized_msg("not signed in")),
         Some(s) => {
             let (workspace_name, workspace_slug): (String, String) = state.db.with(|c| {
                 c.query_row(
@@ -409,7 +409,7 @@ pub async fn me(
             // keys, so the UI needs to know whether the signed-in human's
             // agent is the workspace admin. Still metadata only — no token.
             let is_workspace_admin = super::agents::is_workspace_admin(&state, &s.agent)?;
-            Ok(Json(serde_json::json!({
+            serde_json::json!({
                 "email": s.email,
                 "is_workspace_admin": is_workspace_admin,
                 "agent": {
@@ -425,9 +425,12 @@ pub async fn me(
                     "name": workspace_name,
                     "slug": workspace_slug,
                 },
-            })))
+            })
         }
-    }
+    };
+    // The answer depends on this visitor's cookie: no cache — not the phone's,
+    // not a CDN's — may keep a 401 (or an identity) after it stops being true.
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(body)).into_response())
 }
 
 /// 429 for the per-email login guard, same shape and Retry-After header as

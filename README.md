@@ -172,6 +172,10 @@ session to retrieve the linked agent's bearer token from `GET /ui/api/me`.
 Logging out invalidates the browser session, not the agent's API token.
 Programmatic agents can register separately without a browser account.
 
+Static assets are content-addressed: the shell serves `/app.js` and `/app.css`
+under a `?v=<content hash>` URL and revalidates unversioned requests, so a
+rebuilt binary reaches open browsers and CDNs without a manual cache clear.
+
 ## Configuration
 
 | Environment variable | Default | Purpose |

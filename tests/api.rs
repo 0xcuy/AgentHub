@@ -3978,3 +3978,169 @@ async fn message_task_status_transitions() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["message"]["task_status"], "claimed");
 }
+
+// --- deploy freshness: the shell pins its assets, assets revalidate ---
+
+/// GET a page with optional request headers, returning status, headers and body.
+async fn get_page(
+    router: &RouterT,
+    uri: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, axum::http::HeaderMap, String) {
+    let mut req = Request::builder().uri(uri);
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    let res = Oneshot::new(router.clone(), req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = res.status();
+    let headers = res.headers().clone();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        headers,
+        String::from_utf8_lossy(&bytes).into_owned(),
+    )
+}
+
+fn header<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> &'a str {
+    headers
+        .get(name)
+        .unwrap_or_else(|| panic!("missing {name} header"))
+        .to_str()
+        .unwrap()
+}
+
+fn version_of(etag: &str) -> String {
+    etag.trim_matches('"').chars().take(12).collect()
+}
+
+#[tokio::test]
+async fn app_shell_pins_its_assets_and_assets_revalidate() {
+    let router = test_app("cacheBust");
+
+    // A bare /app.js must be revalidated: it is the URL a phone that loaded
+    // the page before any cache-busting still holds.
+    let (status, js_headers, js) = get_page(&router, "/app.js", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!js.is_empty(), "app.js is served");
+    let js_etag = header(&js_headers, "etag").to_string();
+    assert_eq!(
+        header(&js_headers, "cache-control"),
+        "no-cache",
+        "an unversioned /app.js must revalidate on every load"
+    );
+
+    // The browser's conditional request gets a 304 that keeps the ETag, so a
+    // deploy changes the tag instead of being masked by a cached copy.
+    let (status, conditional, body) =
+        get_page(&router, "/app.js", &[("if-none-match", &js_etag)]).await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+    assert_eq!(header(&conditional, "etag"), js_etag);
+    assert!(body.is_empty(), "a 304 carries no body");
+
+    // The shell serves the assets under URLs that name their content.
+    let (status, shell_headers, shell) = get_page(&router, "/app", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        header(&shell_headers, "cache-control"),
+        "no-cache",
+        "the app shell must revalidate so a deploy reaches open tabs"
+    );
+    let js_version = version_of(&js_etag);
+    assert!(
+        shell.contains(&format!("/app.js?v={js_version}\"")),
+        "app.html must pin app.js to {js_version}"
+    );
+
+    let (_, css_headers, _) = get_page(&router, "/app.css", &[]).await;
+    let css_version = version_of(header(&css_headers, "etag"));
+    assert!(
+        shell.contains(&format!("/app.css?v={css_version}\"")),
+        "app.html must pin app.css to {css_version}"
+    );
+
+    // A pinned URL may be cached for a year; a stale pin must not be.
+    let (status, pinned, _) = get_page(&router, &format!("/app.js?v={js_version}"), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        header(&pinned, "cache-control"),
+        "public, max-age=31536000, immutable"
+    );
+    let (_, stale, _) = get_page(&router, "/app.js?v=000000000000", &[]).await;
+    assert_eq!(
+        header(&stale, "cache-control"),
+        "no-cache",
+        "a stale ?v= must revalidate, never be pinned"
+    );
+}
+
+// --- the login page must not ask a signed-in visitor to sign in again ---
+
+#[tokio::test]
+async fn signed_in_visitor_is_sent_from_login_straight_to_the_app() {
+    let router = test_app("loginLanding");
+    let _ = register(&router, "ll-owner", None).await;
+    let cookie = login_cookie(&router, "ll-owner@example.com").await;
+
+    // The cookie keeps the session across requests: the reload that follows
+    // a login still resolves to the same identity.
+    let (status, me, _) = me_with_cookie(&router, &cookie).await;
+    assert_eq!(status, StatusCode::OK, "the login cookie must keep working");
+    assert_eq!(me["agent"]["handle"], "ll-owner");
+
+    let (status, headers, _) = get_page(&router, "/login", &[("cookie", &cookie)]).await;
+    assert_eq!(
+        status,
+        StatusCode::SEE_OTHER,
+        "a signed-in visitor landing on /login (back button, restored tab) goes to the app"
+    );
+    assert_eq!(header(&headers, "location"), "/app");
+
+    // Signed out, the form still renders.
+    let (status, _, body) = get_page(&router, "/login", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("<form"),
+        "the sign-in form renders when signed out"
+    );
+}
+
+// --- the front door recognises a live session (the reported main bug) ---
+
+#[tokio::test]
+async fn landing_page_recognises_a_signed_in_session() {
+    let router = test_app("landingSession");
+    let _ = register(&router, "ls-owner", None).await;
+    let cookie = login_cookie(&router, "ls-owner@example.com").await;
+
+    // Opening the site with a live session goes into the app — not back to
+    // "Sign in", which is what made every visit look like a fresh login.
+    let (status, headers, body) = get_page(&router, "/", &[("cookie", &cookie)]).await;
+    assert_eq!(
+        status,
+        StatusCode::SEE_OTHER,
+        "a signed-in visitor must not be shown the logged-out landing page"
+    );
+    assert_eq!(header(&headers, "location"), "/app");
+    assert_eq!(
+        header(&headers, "cache-control"),
+        "no-store",
+        "a per-visitor redirect must never be cached"
+    );
+    assert!(body.is_empty());
+
+    // So must the session endpoint: a cached 401 would log the phone out.
+    let (status, me_headers, _) = get_page(&router, "/ui/api/me", &[("cookie", &cookie)]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(header(&me_headers, "cache-control"), "no-store");
+
+    // Signed out, the front door still markets the product.
+    let (status, _, body) = get_page(&router, "/", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("Sign in"),
+        "signed-out visitors still get the sign-in call to action"
+    );
+}
